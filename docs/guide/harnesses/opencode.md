@@ -15,6 +15,9 @@ directories differ; opencode and Copilot cannot share one `.aidlc/` install.
 
 ## Layout: two dot-dirs, on purpose
 
+For a dashboard host with an App Kit/project split, see
+[AI-DLC on Kiro Crew](kiro-crew.md).
+
 opencode auto-imports every `*.ts` under `.opencode/tools/` and
 `.opencode/tool/` as custom tool definitions, and importing a CLI-style engine
 script (top-level dispatch, `process.exit`) crashes the session

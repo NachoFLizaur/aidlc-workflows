@@ -20,6 +20,7 @@ import {
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { PassThrough } from "node:stream";
+import { createTestProject } from "../harness/fixtures.ts";
 import {
   collectPluginStatus,
   comparePluginState,
@@ -42,6 +43,22 @@ const FIXTURES = join(REPO_ROOT, "tests", "fixtures", "plugin-inventory");
 const TEST_PRO = join(REPO_ROOT, "dist", "plugins", "test-pro", "claude");
 const ORIGINAL_ENV = { ...process.env };
 const TEMP: string[] = [];
+
+test("Crew inventory excludes foreign host roots and refuses unavailable-inventory pruning", async () => {
+  const project = createTestProject(); TEMP.push(project);
+  cpSync(join(REPO_ROOT, "dist/kiro-crew/.kiro-crew"), join(project, ".kiro-crew"), { recursive: true });
+  const foreign = pluginRoot("claude");
+  process.env.AIDLC_HARNESS_NAME = "kiro-crew"; process.env.AIDLC_HARNESS_DIR = ".kiro-crew";
+  process.env.CLAUDE_PLUGIN_ROOT = foreign; delete process.env.AIDLC_PLUGIN_ROOT; delete process.env.PLUGIN_ROOT;
+  const before = surfaceSnapshot(project); const foreignBefore = surfaceSnapshot(foreign);
+  expect(discoverPluginInventory(".kiro-crew")).toEqual({ capability: "current-root-only", harness: "kiro-crew", installed: [], invalid: [] });
+  await expect(syncPlugins(project, [], ".kiro-crew")).rejects.toThrow("host inventory unavailable");
+  await expect(syncPlugins(project, ["--prune-missing", "--yes"], ".kiro-crew")).rejects.toThrow("requires a proved full host inventory");
+  expect(surfaceSnapshot(project)).toEqual(before); expect(surfaceSnapshot(foreign)).toEqual(foreignBefore);
+  expect(() => normalizeInstalledPlugin(foreign, "kiro-crew")).toThrow(".kiro-crew-plugin");
+  const crew = join(project, "owned-plugin"); cpSync(join(REPO_ROOT, "dist/plugins/test-pro/kiro-crew"), crew, { recursive: true }); process.env.AIDLC_PLUGIN_ROOT = crew;
+  expect(discoverPluginInventory(".kiro-crew").installed.map(({ manifestPath }) => manifestPath)).toEqual([join(crew, ".kiro-crew-plugin/plugin.json")]);
+});
 
 function temp(prefix: string): string {
   const path = mkdtempSync(join(tmpdir(), prefix));

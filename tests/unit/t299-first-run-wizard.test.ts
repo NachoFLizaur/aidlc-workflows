@@ -45,6 +45,7 @@ const HARNESS_NAMES = [
   "copilot",
   "cursor",
   "kiro",
+  "kiro-crew",
   "kiro-ide",
   "opencode",
 ] as const;
@@ -1339,6 +1340,19 @@ describe("t299 first-run setup wizard", () => {
     }));
   }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
 
+  test("Crew first-run setup installs its own engine and leaves provider access with the host", () => {
+    const result = runWizard("\n", { harnesses: { claude: { found: false }, "kiro-crew": { found: true } } });
+    expect(result.status, result.stdout + result.stderr).toBe(0);
+    expect(existsSync(join(result.project, ".kiro-crew/tools/aidlc.ts"))).toBe(true);
+    const descriptor = JSON.parse(readFileSync(join(result.project, ".kiro-crew/tools/data/harness.json"), "utf8"));
+    expect(descriptor.providers).toBeUndefined();
+    const normalized = result.stdout.replace(/\s+/g, " ");
+    expect(normalized).toContain("Check setup status with the Crew setup helper");
+    expect(normalized).toContain("docs/guide/harnesses/kiro-crew.md#install-and-verify");
+    expect(normalized).toContain("set the project/runtime variables, then run step 5");
+    expect(normalized).toContain("aidlc-crew agent");
+  });
+
   test("a preexisting settings conflict renders the child's message and fix without its JSON plan", () => {
     let before: Record<string, string> = {};
     const result = runWizard("\n", {
@@ -1774,7 +1788,7 @@ describe("t299 first-run setup wizard", () => {
 });
 
 describe("t299 first-run guidance helpers", () => {
-  test("only Kiro IDE ships first-run steps, an editor name, and hook-activation advice", () => {
+  test("harnesses ship only their declared first-run and editor activation guidance", () => {
     for (const harness of HARNESS_NAMES) {
       const root = join(RUNTIME, harness);
       const harnessDir = readdirSync(root).find((entry) =>
@@ -1785,7 +1799,7 @@ describe("t299 first-run guidance helpers", () => {
       const projection = JSON.parse(readFileSync(join(data, "aidlc-projection.json"), "utf-8"));
       const shipped = JSON.parse(readFileSync(join(data, "harness.json"), "utf-8"));
       const kiroIde = harness === "kiro-ide";
-      expect(Object.hasOwn(projection, "firstRunSteps"), harness).toBe(kiroIde);
+      expect(Object.hasOwn(projection, "firstRunSteps"), harness).toBe(kiroIde || harness === "kiro-crew");
       expect(Object.hasOwn(projection, "editorTerminalApp"), harness).toBe(kiroIde);
       expect(Object.hasOwn(shipped, "hookActivation"), harness).toBe(kiroIde);
     }

@@ -27,6 +27,7 @@ import {
   readdirSync,
   readFileSync,
   rmSync,
+  statSync,
   symlinkSync,
   writeFileSync,
 } from "node:fs";
@@ -34,7 +35,7 @@ import { tmpdir } from "node:os";
 import { dirname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { extractTarGz } from "../../core/tools/aidlc-archive.ts";
-import { walkFiles } from "../../core/tools/aidlc-distribution.ts";
+import { projectionFiles, walkFiles } from "../../core/tools/aidlc-distribution.ts";
 import { targetTriple } from "../../core/tools/aidlc-install-paths.ts";
 import {
   digest,
@@ -124,6 +125,8 @@ function legacy28ManifestError(manifest: {
 // hooks/tools exclusion holds on Windows as well as POSIX.
 function isInvocationSurfaceFile(path: string): boolean {
   const rel = path.replaceAll("\\", "/");
+  // The Crew App Kit is host-side code that the App Kit runtime executes with Bun.
+  if (rel.startsWith("kiro-crew-app/")) return false;
   if (!/\.(?:hook|json|md|toml|ts)$/.test(rel) || rel === "install.ts") return false;
   return !/(?:^|\/)(?:hooks|tools)\/.*\.ts$/.test(rel);
 }
@@ -224,7 +227,7 @@ describe("t238 build-binaries release builder", () => {
     )).toBe(true);
   });
 
-  test("invocation-surface selector excludes hook and tool sources under either separator", () => {
+  test("invocation-surface selector excludes sources and Crew App Kit under either separator", () => {
     for (const sep of ["/", "\\"] as const) {
       const p = (...parts: string[]): string => parts.join(sep);
       expect(isInvocationSurfaceFile(p(".claude", "hooks", "aidlc-session-start.ts"))).toBe(false);
@@ -235,6 +238,14 @@ describe("t238 build-binaries release builder", () => {
       expect(isInvocationSurfaceFile(p(".claude", "skills", "aidlc", "SKILL.md"))).toBe(true);
       expect(isInvocationSurfaceFile(p(".codex", "config.toml"))).toBe(true);
       expect(isInvocationSurfaceFile(p(".claude", "settings.json"))).toBe(true);
+      expect(isInvocationSurfaceFile(p("kiro-crew-app", "hooks.fragment.json"))).toBe(false);
+      expect(isInvocationSurfaceFile(p("kiro-crew-app", "setup", "aidlc-kiro-crew-setup.ts"))).toBe(false);
+      expect(isInvocationSurfaceFile(p("kiro-crew-app", "mcp", "aidlc-mcp-bridge.ts"))).toBe(false);
+      expect(isInvocationSurfaceFile(p(".kiro-crew", "hooks", "aidlc.json"))).toBe(true);
+      expect(isInvocationSurfaceFile(p(".kiro-crew", "tools", "data", "harness.json"))).toBe(true);
+      expect(isInvocationSurfaceFile(p(".kiro-crew", "skills", "aidlc", "SKILL.md"))).toBe(true);
+      expect(isInvocationSurfaceFile(p(".kiro-crew", "kiro-crew-app", "hooks.fragment.json"))).toBe(true);
+      expect(isInvocationSurfaceFile(p("kiro-crew-app-other", "hooks.fragment.json"))).toBe(true);
     }
     expect(isInvocationSurfaceFile("install.ts")).toBe(false);
     expect(isInvocationSurfaceFile("AGENTS.md")).toBe(true);
@@ -263,6 +274,7 @@ describe("t238 build-binaries release builder", () => {
       "kiro-ide",
       "copilot",
       "opencode",
+      "kiro-crew",
     ]) {
       expect(existsSync(join(dirname(native.artifact), "runtime", harness))).toBe(true);
     }
@@ -309,6 +321,7 @@ describe("t238 build-binaries release builder", () => {
       "runtime-kiro-ide",
       "runtime-copilot",
       "runtime-opencode",
+      "runtime-kiro-crew",
       "harness-probe-kiro",
       "harness-probe-copilot",
       "harness-probe-opencode",
@@ -528,6 +541,23 @@ describe("t238 build-binaries release builder", () => {
         join(releaseDir, releaseRuntimeAsset(AIDLC_VERSION)),
         nativeRoot,
       );
+      for (const [extracted, channel] of [[copyRoot, "dist"], [nativeRoot, "dist-release"]]) {
+        const crew = join(extracted, "runtime", "kiro-crew");
+        const { descriptor } = projectionFiles(crew);
+        expect(descriptor.managedDirectories).not.toContain("kiro-crew-app");
+        expect(descriptor.hostDirectories).toContain("kiro-crew-app");
+        const shippedApp = join(REPO_ROOT, channel, "kiro-crew", "kiro-crew-app");
+        const archivedApp = join(crew, "kiro-crew-app");
+        const appFiles = walkFiles(shippedApp);
+        expect(appFiles.length).toBeGreaterThan(0);
+        expect(walkFiles(archivedApp)).toEqual(appFiles);
+        for (const path of appFiles) {
+          expect(readFileSync(join(archivedApp, path))).toEqual(readFileSync(join(shippedApp, path)));
+          if (process.platform !== "win32") {
+            expect(statSync(join(archivedApp, path)).mode & 0o777).toBe(statSync(join(shippedApp, path)).mode & 0o777);
+          }
+        }
+      }
       for (const distribution of releaseManifest.distributions.map(({ name }) => name)) {
         const copyHarnessRoot = join(copyRoot, "runtime", distribution);
         const nativeHarnessRoot = join(nativeRoot, "runtime", distribution);

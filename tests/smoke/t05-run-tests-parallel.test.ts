@@ -702,6 +702,7 @@ describe("t05 run-tests.sh --parallel flag (migrated from t05-run-tests-parallel
       "AIDLC_CURSOR_RUN_LIVE",
       "AIDLC_KIRO_IDE_LIVE",
       "AIDLC_OPENCODE_RUN_LIVE",
+      "AIDLC_KIRO_CREW_LIVE",
     ];
     writeFileSync(
       plant,
@@ -722,6 +723,9 @@ describe("t05 run-tests.sh --parallel flag (migrated from t05-run-tests-parallel
       );
       expect(r.status).toBe(0);
       expect(r.out).toContain("=== START tZZ-no-llm-gates-t05.test.ts ===");
+      const veto = run(["--integration", "--filter", "tZZ-no-llm-gates-t05"], { ...liveEnv, AIDLC_NO_LLM: "1" });
+      expect(veto.status).toBe(0);
+      expect(veto.out).toContain("=== START tZZ-no-llm-gates-t05.test.ts ===");
     } finally {
       rmSync(plant, { force: true });
     }

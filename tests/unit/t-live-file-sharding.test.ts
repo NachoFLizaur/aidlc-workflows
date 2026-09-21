@@ -35,6 +35,11 @@ function qualifiedName(file: string): string {
 }
 
 describe("bounded live file sharding", () => {
+  test("Crew registration is discovered once and remains excluded from hosted selection", () => {
+    expect(partition.get("kiro-crew")).toEqual(["tests/e2e/t-run-kiro-crew-status.serial.test.ts"]);
+    for (const kind of kinds) expect(liveMatrix(kind).include.some(({ family }) => family === "kiro-crew")).toBe(false);
+    for (const platform of platforms) expect(() => selectedLiveFiles("kiro-crew", platform)).toThrow("excluded");
+  });
   test("each runner OS has its own live matrix", () => {
     expect(LIVE_MATRICES).toEqual({ linux: "linux", macos: "darwin", windows: "win32" });
     for (const kind of kinds) {

@@ -2,6 +2,46 @@
 
 This chapter documents the hook system architecture, all seventeen hook scripts, the audit event taxonomy, CLI tool configuration, and the deterministic utility tool.
 
+## Kiro Crew hook contract
+
+Crew's App Kit entry forwards events to the selected project's
+`.kiro-crew/hooks/aidlc-kiro-crew-adapter.ts`. Setup registers these events in
+the Crew home hook store; copying core scripts alone does not activate them.
+
+| Event | Adapter behavior |
+| --- | --- |
+| `AgentSpawn` | Initialize an absent engine session binding; preserve valid bindings, including a null intent |
+| `UserPromptSubmit` | Record real human turns through the dispatcher; exclude child, automation, and continuation envelopes from answer authority |
+| `PreToolUse` | Inspect structured tool input, apply state-transition, plan-approval, review-freeze, and reviewer-scope guards; relay refusals |
+| `PostToolUse` | Detect conductor create/replace outputs within the selected record or CodeKB boundary and request core audit emission |
+| `Stop` | Consult the dispatch ledger before core continuation; outstanding children suppress nudges, malformed ledgers suppress with a diagnostic |
+
+Identity, project selection, and engine binding are checked before core work.
+Absent app bindings opt out; corrupt routing refuses guarded PreToolUse with
+exit 2 and produces a diagnostic on advisory events. Present corrupt or stale
+engine bindings never fall back to shared cursors or gateway cwd. Local
+routing records are not authentication or permission grants.
+
+Permission-request hooks can prevent inspectable calls. Backend-start
+notifications and diff-only writes are advisory: they do not establish
+containment. Display titles never become executable commands or write targets.
+Core policy switches still apply; there is no adapter-specific bypass.
+Child-hook delivery and arbitrary MCP write inspection are not guaranteed.
+
+Create/replace detection checks authorization freshness before emitting audit
+rows. Same-second ordering, duplicate rows, already-fresh files, and concurrent
+authorization replacement remain limitations. Detection is not prevention.
+Sensors, graph rebuild, state sync, session-end, compaction, subagent-stop,
+statusline, usage folding, and dispatch-rule delivery are not registered.
+
+The conductor calls `aidlc_status` then doctor before workflow work and uses
+`aidlc_engine` with raw argv, not shell commands. The bridge refuses project
+overrides and bounds each subprocess to 120 seconds and 4 MiB output; failure
+is not a success receipt. Host child completion must be correlated with the
+dispatch ledger, then paired with the engine receipts required by the owning
+protocol. Neither a question card nor an automatic continuation is approval.
+See [Crew setup and daily use](../guide/harnesses/kiro-crew.md).
+
 > **Path convention.** State, audit, and artifacts live under the active intent's **record dir** — `aidlc/spaces/<space>/intents/<YYMMDD>-<label>/`, written `<record>/` below (a compact UTC date prefix plus a short kebab-case label so record dirs sort chronologically; the canonical id is the UUIDv7 in the `intents.json` registry row). The audit trail is a directory of per-clone shards under `<record>/audit/`, not a single file.
 
 ---

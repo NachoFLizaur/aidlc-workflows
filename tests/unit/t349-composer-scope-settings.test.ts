@@ -474,7 +474,7 @@ describe("t349 (7) a custom scope written with the approved settings runs with t
 });
 
 describe("t349 (8) every composer surface names the settings contract", () => {
-  const harnesses = ["claude", "codex", "copilot", "cursor", "kiro", "kiro-ide", "opencode"];
+  const harnesses = ["claude", "codex", "copilot", "cursor", "kiro", "kiro-ide", "opencode", "kiro-crew"];
   const skills = harnesses.map((harness) => `harness/${harness}/skills/aidlc/SKILL.md`);
   const surfaces = [
     "core/agents/aidlc-composer-agent.md",

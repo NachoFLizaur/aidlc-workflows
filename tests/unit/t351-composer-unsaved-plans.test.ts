@@ -610,7 +610,7 @@ describe("t351 (6) approved stage changes and settings land in one recompose wri
 });
 
 describe("t351 (7) every conductor surface offers the save and never writes scope files itself", () => {
-  const harnesses = ["claude", "codex", "copilot", "cursor", "kiro", "kiro-ide", "opencode"];
+  const harnesses = ["claude", "codex", "copilot", "cursor", "kiro", "kiro-ide", "opencode", "kiro-crew"];
   const read = (surface: string) => readFileSync(join(REPO_ROOT, surface), "utf-8");
 
   test("each SKILL.md offers Approve and save as scope and saves on request", () => {

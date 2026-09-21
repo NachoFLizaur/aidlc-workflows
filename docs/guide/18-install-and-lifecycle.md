@@ -12,6 +12,10 @@ are not available yet. Manual-copy users install Bun and take the versioned,
 Bun-invoking runtime from `aidlc-copy-runtime-X.Y.Z.tar.gz`; they do not need the
 native `aidlc` command.
 
+Kiro Crew has a separate host integration: its setup, MCP bridge, and script
+hooks require Bun even with native `aidlc`. Project config alone does not
+register or trust the App Kit. Follow [Crew install and verify](harnesses/kiro-crew.md#install-and-verify).
+
 ## Install
 
 Release assets cover:
@@ -50,7 +54,7 @@ failure and prints the command above; it never runs `apk` or installs system
 packages. The upstream Bun tracking includes `oven-sh/bun#15829` and
 `oven-sh/bun#29681`.
 
-The installer includes `claude`, `kiro`, `kiro-ide`, `codex`, and `opencode`
+The installer includes `claude`, `kiro`, `kiro-ide`, `codex`, `opencode`, and `kiro-crew`
 together:
 
 ```bash
@@ -566,6 +570,7 @@ Recorded Bedrock answers apply through the normal staged config transaction:
 | Codex CLI | Records the choice and instructs the user to keep provider, credentials, and model in `~/.codex/config.toml` |
 | Kiro CLI | No provider answer; model access comes with Kiro |
 | Kiro IDE | No provider answer; model access comes with Kiro |
+| Kiro Crew | No provider answer; backend/model access is configured through Crew |
 | opencode | Offers to write `provider.amazon-bedrock.options.region/profile` to `opencode.json`; `--opencode-default yes|no` records the answer |
 | GitHub Copilot | Records acknowledgement of the manual BYOK environment setup |
 | Cursor | Records acknowledgement of the manual provider and model-picker setup |
@@ -960,6 +965,7 @@ Successful config prints the host-specific next step:
 | Kiro IDE | Open this project in Kiro IDE; if the Restricted Mode banner shows at the top of the window and you know what is in this folder, select Manage on it, then Trust; run `Developer: Reload Window` from the Command Palette (Ctrl+Shift+P, or Cmd+Shift+P on macOS), choose the aidlc agent in the chat panel's agent picker, then run `/aidlc --doctor` (in Kiro CLI, start `kiro-cli` in the project instead and run `/aidlc --doctor`) |
 | Codex CLI | Run `codex`, then `$aidlc --doctor` |
 | OpenCode | Run `opencode`, then `/aidlc --doctor` |
+| Kiro Crew | Complete App Kit setup, operator trust, app/hook registration, and doctor; select the project and **aidlc-crew** in a new dashboard chat |
 
 ## Update and Version Selection
 

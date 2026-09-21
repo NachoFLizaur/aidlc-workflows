@@ -56,6 +56,7 @@ const EXPECTED: Record<
     codex: { model: string | null; effort: "medium" | null };
     cursor: { model: string | null };
     kiro: { model: string | null };
+    "kiro-crew": { model: string | null };
     opencode: { model: string | null; variant: "medium" | null };
   }
 > = {
@@ -64,6 +65,7 @@ const EXPECTED: Record<
     codex: { model: null, effort: null },
     cursor: { model: null },
     kiro: { model: null },
+    "kiro-crew": { model: null },
     opencode: { model: null, variant: null },
   },
   balanced: {
@@ -80,6 +82,7 @@ const EXPECTED: Record<
     // model is enabled on the user's install, so every Kiro tier inherits
     // the session model.
     kiro: { model: null },
+    "kiro-crew": { model: null },
     opencode: { model: null, variant: "medium" },
   },
   templated: {
@@ -87,6 +90,7 @@ const EXPECTED: Record<
     codex: { model: null, effort: null },
     cursor: { model: null },
     kiro: { model: null },
+    "kiro-crew": { model: null },
     opencode: { model: null, variant: null },
   },
 };
@@ -127,7 +131,7 @@ describe("t220 tier projection module", () => {
 
   // --- projectTier: every tier x every projection flavor ---------------------
   for (const tier of TIERS) {
-    for (const flavor of ["claude", "codex", "cursor", "kiro", "opencode"] as const) {
+    for (const flavor of ["claude", "codex", "cursor", "kiro", "opencode", "kiro-crew"] as const) {
       test(`projectTier(${tier}, ${flavor}) matches the pinned policy`, () => {
         expect(projectTier(tier, flavor)).toEqual(EXPECTED[tier][flavor]);
       });

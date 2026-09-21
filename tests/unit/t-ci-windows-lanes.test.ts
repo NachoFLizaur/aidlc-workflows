@@ -152,6 +152,7 @@ describe("t-ci-windows-lanes", () => {
       "tests/unit/t218-kiro-ide-hook-adapter.test.ts",
       "tests/unit/t241-opencode-adapter.test.ts",
       "tests/unit/t249-copilot-adapter.test.ts",
+      "tests/unit/t-kiro-crew-adapter.test.ts",
       "tests/unit/t276-cursor-adapter.test.ts",
       "tests/integration/t121-stop-hook-enforce.test.ts",
     ]) {

@@ -9,7 +9,7 @@
 // `2>/dev/null || true`.
 //
 // Runs on SessionStart (Claude/Codex/Cursor/Kiro IDE) or explicitly on Kiro CLI. Harness-agnostic:
-//   PLUGIN_ROOT   ← CLAUDE_PLUGIN_ROOT | PLUGIN_ROOT | AIDLC_PLUGIN_ROOT |
+//   PLUGIN_ROOT   ← CLAUDE_PLUGIN_ROOT (non-Crew only) | PLUGIN_ROOT | AIDLC_PLUGIN_ROOT |
 //                   this file's parent plugin directory
 //   PROJECT_DIR   ← CLAUDE_PROJECT_DIR | AIDLC_PROJECT_DIR | PWD  (Codex unsets the first)
 //   HARNESS_LEAF  ← AIDLC_HARNESS_DIR  (".claude" default)
@@ -34,11 +34,6 @@ import { basename, dirname, join, relative, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
-const PLUGIN_ROOT =
-  process.env.CLAUDE_PLUGIN_ROOT ||
-  process.env.PLUGIN_ROOT ||
-  process.env.AIDLC_PLUGIN_ROOT ||
-  dirname(dirname(fileURLToPath(import.meta.url)));
 const PROJECT_DIR = resolve(
   process.env.CLAUDE_PROJECT_DIR ||
     process.env.AIDLC_PROJECT_DIR ||
@@ -67,6 +62,14 @@ const HARNESS_NAME = (() => {
 })();
 const IS_COPILOT = HARNESS_NAME === "copilot";
 const IS_OPENCODE = HARNESS_NAME === "opencode";
+const IS_KIRO_CREW = HARNESS_NAME === "kiro-crew" || HARNESS_LEAF === ".kiro-crew";
+// Resolve before copying: a foreign Claude root is not a Crew source.
+// Missing owned/generic hints use this hook's root; no foreign fallback.
+const PLUGIN_ROOT =
+  (!IS_KIRO_CREW && process.env.CLAUDE_PLUGIN_ROOT) ||
+  process.env.PLUGIN_ROOT ||
+  process.env.AIDLC_PLUGIN_ROOT ||
+  dirname(dirname(fileURLToPath(import.meta.url)));
 const STAGES_DIR = join(HARNESS_DIR, "aidlc-common", "stages");
 const SKILLS_DIR = IS_COPILOT
   ? join(PROJECT_DIR, ".github", "skills")
@@ -144,7 +147,7 @@ function pluginNameFromRoot(): string {
   const supplied = process.env.AIDLC_PLUGIN_KEY?.trim();
   if (supplied && SAFE_PLUGIN_KEY.test(supplied)) return supplied;
   if (!PLUGIN_ROOT) return "plugin";
-  for (const md of [
+  for (const md of IS_KIRO_CREW ? [".kiro-crew-plugin"] : [
     ".claude-plugin",
     ".codex-plugin",
     ".opencode-plugin",
@@ -1258,15 +1261,19 @@ function installedIdeAgentIsDispatchable(agentsDir: string, agent: string): bool
 // the recorded harness name: CLI uses agent-v1 JSON + trustedAgents, while IDE
 // uses capability-bearing Markdown and never reads the CLI conductor JSON.
 async function kiroPluginAgentPrechecks(): Promise<KiroPluginAgentPrechecks | null> {
+  // Crew has no dispatch inventory oracle. Before copying stages, reject every
+  // dispatch/reviewer reference regardless of foreign rosters or inline personas.
+  // Reviewer-free inline content remains usable; no environment bypass exists.
   if (
     HARNESS_LEAF !== ".kiro" &&
     HARNESS_LEAF !== ".codex" &&
-    HARNESS_LEAF !== ".aidlc"
+    HARNESS_LEAF !== ".aidlc" &&
+    !IS_KIRO_CREW
   ) {
     return null;
   }
   const isKiroIde = HARNESS_NAME === "kiro-ide";
-  const isKiroCli = HARNESS_LEAF === ".kiro" && !isKiroIde;
+  const isKiroCli = HARNESS_LEAF === ".kiro" && !isKiroIde && !IS_KIRO_CREW;
   const surfaceExt = isKiroIde
     ? ".md"
     : HARNESS_LEAF === ".kiro"
@@ -1301,6 +1308,9 @@ async function kiroPluginAgentPrechecks(): Promise<KiroPluginAgentPrechecks | nu
     missingTrust: boolean;
   }
   const remediationFor = (gap: DispatchGap, isReviewer: boolean): string => {
+    if (IS_KIRO_CREW) {
+      return `Crew dispatch registration for "${gap.agent}" is unverified; ${isReviewer ? "remove the stage's reviewer: field" : "change the stage's mode to inline"} until a Crew dispatch inventory is supported`;
+    }
     const requirements: string[] = [];
     if (gap.missingSurface) {
       requirements.push(
@@ -1416,10 +1426,10 @@ async function kiroPluginAgentPrechecks(): Promise<KiroPluginAgentPrechecks | nu
       if (!agent || gaps.has(agent)) continue;
       const gap = {
         agent,
-        missingSurface: isKiroIde
+        missingSurface: IS_KIRO_CREW || (isKiroIde
           ? !installedIdeAgentIsDispatchable(surfaceDir, agent)
           : !existsSync(join(surfaceDir, `${agent}${surfaceExt}`)) &&
-            !(HARNESS_LEAF === ".aidlc" && pluginShipsViableNativeAgent(agent)),
+            !(HARNESS_LEAF === ".aidlc" && pluginShipsViableNativeAgent(agent))),
         missingTrust: isKiroCli && !trustedAgents.has(agent),
       };
       if (gap.missingSurface || gap.missingTrust) gaps.set(agent, gap);
@@ -1901,7 +1911,7 @@ try {
         HARNESS_LEAF === ".kiro" ? kiroNativeAgentPrecheck() : undefined,
         installedNameCollisionPrecheck(agentsDir, "agents"),
       ),
-      HARNESS_LEAF === ".aidlc"
+      HARNESS_LEAF === ".aidlc" || IS_KIRO_CREW
         ? ({ content }) => projectOpencodeAgentMemory(content)
         : HARNESS_LEAF === ".cursor"
           ? projectCursorNativeAgent

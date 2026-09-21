@@ -4,7 +4,7 @@
 
 ## What is AI-DLC?
 
-AI-DLC (AI-Driven Development Life Cycle) is a methodology for structuring AI-assisted software development into repeatable, traceable phases. It originated from the [AWS AI-DLC methodology](https://aws.amazon.com/blogs/devops/ai-driven-development-life-cycle/). This repository implements it natively from one harness-neutral core, so it runs inside the CLI harness you already use — today Claude Code, Kiro CLI, Kiro IDE, Codex CLI, Cursor, opencode, or GitHub Copilot. This guide is harness-neutral; where a detail differs by harness, it says so and points you to your harness's chapter (see [Running on other harnesses](harnesses/README.md)). Examples are shown in Claude Code unless noted.
+AI-DLC (AI-Driven Development Life Cycle) is a methodology for structuring AI-assisted software development into repeatable, traceable phases. It originated from the [AWS AI-DLC methodology](https://aws.amazon.com/blogs/devops/ai-driven-development-life-cycle/). This repository implements it natively from one harness-neutral core, so it runs inside the host you already use — today Claude Code, Kiro CLI, Kiro IDE, Codex CLI, Cursor, opencode, GitHub Copilot, or Kiro Crew. This guide is harness-neutral; where a detail differs by harness, it says so and points you to your harness's chapter (see [Running on other harnesses](harnesses/README.md)). Examples are shown in Claude Code unless noted.
 
 You invoke it with a single command:
 
@@ -13,6 +13,9 @@ You invoke it with a single command:
 ```
 
 AI-DLC then guides you through a structured workflow — from capturing your intent, through requirements, design, implementation, testing, and deployment — while keeping you in control at every decision point.
+
+On [Kiro Crew](harnesses/kiro-crew.md), send the request as plain text to
+**aidlc-crew** in a dashboard chat with the project selected, after App Kit setup.
 
 ## Philosophy: Small Mob, Broad Agents
 
@@ -80,5 +83,5 @@ To reshape *how* AI-DLC behaves — add a stage or an agent, define a scope, aut
 | [Skills and Runner Commands](17-skills.md) | The `/aidlc-*` stage- and scope-runner commands and the author-your-own-runner path |
 | [Install and Lifecycle](18-install-and-lifecycle.md) | Native install, init, upgrades, rollback, pins, offline packages, and uninstall |
 | [Multi-Team Construction and Workshop Mode](workshop-mode.md) | Claim, build, pinned merge-back, release, and workshop flow for clone and sibling-worktree teams |
-| [Running on other harnesses](harnesses/README.md) | Install and run on Kiro CLI, Kiro IDE, Codex CLI, Cursor, opencode, or GitHub Copilot, and what differs per harness |
+| [Running on other harnesses](harnesses/README.md) | Install and run on Kiro CLI, Kiro IDE, Codex CLI, Cursor, opencode, GitHub Copilot, or Kiro Crew, and what differs per harness |
 | [Glossary](glossary.md) | All terminology defined |

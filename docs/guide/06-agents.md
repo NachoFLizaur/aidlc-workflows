@@ -2,6 +2,12 @@
 
 AI-DLC ships 14 agent personas: 11 domain experts that execute stage work, 2 review-only agents, and the adaptive-workflows composer. This chapter explains the full roster, beginning with the domain agents and then covering the reviewers and composer.
 
+On [Kiro Crew](harnesses/kiro-crew.md#daily-use), `.kiro-crew/agents/` supplies
+inline persona context and the App Kit registers separate role agents. The
+conductor resolves names through `role-map.json` and dispatches asynchronously;
+children do not mount Crew dispatch tools. Backend/model selection belongs to
+Crew, not AI-DLC tier pins. Host completion does not replace engine receipts.
+
 ---
 
 ## Philosophy: Small Mob, Broad Agents

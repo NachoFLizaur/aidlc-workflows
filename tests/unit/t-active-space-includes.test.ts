@@ -37,6 +37,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { createTestProject } from "../harness/fixtures.ts";
 import { repointHarnessIncludes } from "../../core/tools/aidlc-includes.ts";
 
 const REPO_ROOT = join(import.meta.dir, "..", "..");
@@ -84,6 +85,20 @@ function seedSpaces(root: string, cursor?: string): void {
     writeFileSync(join(root, "aidlc", "active-space"), `${cursor}\n`);
   }
 }
+
+test("Crew repoints only owned personas and preserves all other bytes on round-trip", () => {
+  const root = createTestProject(); scratch.push(root); seedSpaces(root);
+  process.env.AIDLC_HARNESS_DIR = ".kiro-crew"; process.env.AIDLC_HARNESS_NAME = "kiro-crew";
+  const owned = ".kiro-crew/agents/aidlc-architect-agent.md";
+  const foreign = [".kiro/agents/aidlc-architect-agent.md", ".kiro-crew/agents/host.json", "crew/kiro/agents/app--architect.json", "AGENTS.md"];
+  const original = "---\r\nname: aidlc-architect-agent\r\n---\r\nRead aidlc/spaces/default/memory/org.md\r\nKeep everything else.\r\n";
+  for (const rel of [owned, ...foreign]) { const path = join(root, rel); mkdirSync(join(path, ".."), { recursive: true }); writeFileSync(path, original); }
+  expect(portablePaths(repointHarnessIncludes(root, "teamB"))).toEqual([owned]);
+  expect(readFileSync(join(root, owned), "utf8")).toBe(original.replace("/default/", "/teamB/"));
+  expect(repointHarnessIncludes(root, "teamB")).toEqual([]);
+  for (const rel of foreign) expect(readFileSync(join(root, rel), "utf8")).toBe(original);
+  expect(portablePaths(repointHarnessIncludes(root, "default"))).toEqual([owned]); expect(readFileSync(join(root, owned), "utf8")).toBe(original);
+});
 
 describe("t-active-space-includes: Claude @-stub", () => {
   beforeEach(() => {

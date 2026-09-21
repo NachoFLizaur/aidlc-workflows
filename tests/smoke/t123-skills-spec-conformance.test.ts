@@ -123,6 +123,7 @@ const FRESH_SESSION_TEXT: Record<string, string> = {
   "kiro-ide": "open a new Kiro IDE chat or start a new Kiro CLI session",
   opencode: "exit or restart OpenCode and start a new session",
   copilot: "start a new Copilot CLI session or open a new VS Code agent chat",
+  "kiro-crew": "exit or restart the current harness and start a new session",
 };
 const CURSOR_SHORTCUT_SKILLS = ["aidlc-jump", "aidlc-scope", "aidlc-status"];
 

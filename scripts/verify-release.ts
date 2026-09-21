@@ -22,6 +22,7 @@ const RELEASE_DISTRIBUTIONS = [
   "copilot",
   "cursor",
   "kiro",
+  "kiro-crew",
   "kiro-ide",
   "opencode",
 ] as const;

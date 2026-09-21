@@ -755,6 +755,31 @@ To add artifact assertions to an existing e2e workflow test under `tests/e2e/`:
 - **Graceful degradation** — Use `skip` when an assertion depends on non-deterministic LLM output
 - **Structure over content** — Check for markdown headings (`^#`), file existence, directory creation before checking content
 
+## Kiro Crew tests
+
+Install the pinned Bun dependencies and generate the Crew distribution before
+running the deterministic packaging, adapter, setup, session, and protocol checks:
+
+```bash
+bun install --frozen-lockfile
+bun scripts/package.ts
+bun test tests/unit/t-kiro-crew-*.test.ts
+```
+
+The registration/status journey additionally requires `kirocrew` and Bun on
+PATH. It creates a disposable project and Crew home, registers the emitted App
+Kit, and calls its registered MCP server. It does not start a gateway, send a
+model prompt, copy authentication homes, or create a workflow.
+
+```bash
+AIDLC_KIRO_CREW_LIVE=1 bun test tests/e2e/t-run-kiro-crew-status.serial.test.ts
+```
+
+Without opt-in it skips before host lookup or scratch creation. `--no-llm`
+through the runner, or `AIDLC_NO_LLM=1`, also disables it. Once explicitly
+enabled, missing prerequisites fail rather than count as a successful skip.
+Only test-owned scratch state is removed. Hosted execution is excluded.
+
 ## Environment Variables
 
 | Variable | Default | Description |
@@ -771,6 +796,7 @@ To add artifact assertions to an existing e2e workflow test under `tests/e2e/`:
 | `AIDLC_TUI_TRACE_POLL_MS` | `10000` | Minimum interval between `answer_gate_poll` snapshots in TUI NDJSON traces while a long journey is waiting for the next menu or disk terminator. |
 | `AIDLC_ACP_DIAGNOSTIC_TRACE` | unset | Set to `1` with ACP debug tracing to write a private `<trace>.protocol.ndjson` sidecar containing tool input/chunk events, session/turn identity, cancellation requests and aggregate input shapes. Excludes agent-prose events, prompt/auth RPC bodies and process environment. Tool inputs remain private diagnostic data. Limits: 1 MiB per event and 64 MiB per file; `diagnostic_incomplete` or `json_parse_error` means the capture cannot establish complete protocol evidence. |
 | `AIDLC_KIRO_IDE_LIVE` | unset | Set to `1` to run the signed-in Kiro IDE desktop journey on macOS or Windows. |
+| `AIDLC_KIRO_CREW_LIVE` | unset | Set to `1` for the isolated Crew registration/status journey; disabled by no-LLM mode. |
 | `AIDLC_KIRO_IDE_BIN` | platform default | Override the Kiro IDE executable. Defaults to `/Applications/Kiro.app/Contents/MacOS/Electron` on macOS and `%LOCALAPPDATA%\Programs\Kiro\Kiro.exe` on Windows. |
 | `AIDLC_KIRO_IDE_SEED` | generated seed | Optional Kiro user-data directory. The test copies it to a disposable temp directory before launch and never mutates the source profile. |
 | `AIDLC_KIRO_IDE_DIAGNOSTICS` | unset | Optional per-file NDJSON diagnostic path. Includes up to 64 lifecycle records per IDE launch: owned PID, timestamps, browser-close protocol events, child exit/close and fallback signals. Records exclude endpoints, profile contents, raw error text and environment values; diagnostic I/O failures do not replace test failures. |
@@ -822,7 +848,7 @@ bash tests/run-tests.sh       # POSIX compatibility wrapper
 ```
 
 `--no-llm` (or `AIDLC_NO_LLM=1`) closes the derived Claude gate and forces every
-live-model opt-in to `0`: Claude TUI, Kiro ACP/TUI/IDE, Codex exec, and opencode
+live-model opt-in to `0`: Claude TUI, Kiro ACP/TUI/IDE, Crew registration/status, Codex exec, and opencode
 run. Deterministic tests in those tiers still run, including the token-free TUI
 substrate preflight. This gives CI a full-tier deterministic profile without
 live-model cost or flakiness, even when CLIs are installed and live variables

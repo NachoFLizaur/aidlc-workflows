@@ -144,6 +144,7 @@ const HARNESS_DATA: Record<string, string> = {
   kiro: "dist/kiro/.kiro/tools/data/harness.json",
   "kiro-ide": "dist/kiro-ide/.kiro/tools/data/harness.json",
   opencode: "dist/opencode/.aidlc/tools/data/harness.json",
+  "kiro-crew": "dist/kiro-crew/.kiro-crew/tools/data/harness.json",
 };
 
 function seedHarnessData(): void {

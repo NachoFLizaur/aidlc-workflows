@@ -70,6 +70,7 @@ const HARNESS_RUNTIMES = [
   { name: "kiro", dir: ".kiro" },
   { name: "kiro-ide", dir: ".kiro" },
   { name: "opencode", dir: ".aidlc" },
+  { name: "kiro-crew", dir: ".kiro-crew" },
 ] as const;
 type Harness = (typeof HARNESS_RUNTIMES)[number];
 type Projection = "source" | "native";

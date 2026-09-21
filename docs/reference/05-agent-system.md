@@ -38,6 +38,13 @@ Kiro IDE projects this core contract differently: it removes
 capability-scoped `permissions.rules`. Omitting `subagent` from `tools:` carries
 the same no-nested-delegation constraint in the IDE's native vocabulary.
 
+Crew keeps persona Markdown in `.kiro-crew/agents/` as explicit context and
+registers inline prompt bodies in its App Kit. `role-map.json` maps engine roles
+to host dispatch names. Only the conductor mounts Crew dispatch; workers keep
+project resources and the engine MCP tools. Agent JSON omits model pins, and
+AI-DLC model/effort policy is unexpressed on this host. See
+[Crew daily use](../guide/harnesses/kiro-crew.md#daily-use) for delivery limits.
+
 ### Markdown Body Sections
 
 Below the frontmatter, the markdown body defines:

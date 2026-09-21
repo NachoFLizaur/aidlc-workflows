@@ -134,7 +134,7 @@ describe("t151 neutral and native onboarding", () => {
         expect(setup, harness.name).toContain(
           `${native ? "aidlc" : `bun ${harness.manifest.harnessDir}/tools/aidlc.ts`} engine runtime summary --json`,
         );
-        expect(setup, harness.name).not.toContain(`${fills.invoke} engine`);
+        if (fills.invoke !== "aidlc") expect(setup, harness.name).not.toContain(`${fills.invoke} engine`);
         expect(setup, harness.name).toContain(
           `${native ? "aidlc" : `bun ${harness.manifest.harnessDir}/tools/aidlc.ts`} engine knowledge <verb>`,
         );
@@ -142,6 +142,9 @@ describe("t151 neutral and native onboarding", () => {
         if (harness.manifest.onboarding?.harnessDst) {
           expect(root, harness.name).toBe(NEUTRAL);
           expect(setup, harness.name).not.toContain("## Where things live");
+        } else if (harness.name === "kiro-crew") {
+          expect(harness.onboardingDist).toBe(join(harness.distRoot, ".kiro-crew/AGENTS.md"));
+          expect(setup).toContain("# AI-DLC on Kiro Crew");
         } else {
           expect(setup.match(/^#+ .+$/gm)?.[0], harness.name).toBe("# Project Name <!-- Replace with your project name -->");
           expect(setup.endsWith("\n## Shared AI-DLC onboarding\n\n" + NEUTRAL), harness.name).toBe(true);

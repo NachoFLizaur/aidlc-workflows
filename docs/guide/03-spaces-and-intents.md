@@ -18,11 +18,16 @@ how that works and where everything lives.
 
 When you run `aidlc config`, it projects the selected engine into one
 harness-specific directory (`.claude/` on Claude Code, `.kiro/` on Kiro,
-`.codex/` on Codex, `.aidlc/` on opencode and GitHub Copilot). That directory is the *only* part of the layout that
+`.codex/` on Codex, `.aidlc/` on opencode and GitHub Copilot, `.kiro-crew/` on Kiro Crew). That directory is the *only* part of the workflow layout that
 differs by harness. From then on, everything AI-DLC produces lives under one
 neutral `aidlc/` directory at your project root — organized by *what you're
 working on*, not by which harness you happen to run. You browse `aidlc/`; you
 never need to open the engine directory.
+
+Crew's App Kit lives separately in the Crew home. Its conversation binding
+selects the project; the engine's session binding selects the space and intent.
+Rules remain in the shared memory tree and are delivered as engine context,
+not an ambient host include. See [Crew layout](harnesses/kiro-crew.md#layout-app-kit-and-project).
 
 Here is a complete workspace with two teams and a few intents in flight (the
 engine directory is shown as `.claude/` — read it as `.kiro/` or `.codex/` on

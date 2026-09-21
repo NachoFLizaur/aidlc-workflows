@@ -176,6 +176,8 @@ const manifest: HarnessManifest = {
           "sha256:94f27a88ddba31149876da0609e0eb9a36ce153f52f27898579c846daec2ff59",
           // The pre-neutral shipped variant (#1268 made the root block harness-neutral).
           "sha256:5f6f076a5a9d8a11e1078f568c9dee091f399d9999fae89e9dffa62d8697b797",
+          // Keep v2.9.0 unmarked onboarding recognizable.
+          "sha256:d20a161ab572313458c9aeb9e88b928b7b33e373170c0f58b3c10b1828fbcc81",
         ],
       },
     },
@@ -226,7 +228,7 @@ const manifest: HarnessManifest = {
     // ignore inside harness/kiro-ide/; projectRoot routes it to dist/kiro-ide/.gitignore
     // + the --check determinism guard. (Kiro IDE DOES support a promptSubmit seam (the
     // human-turn mint hook) and a preToolUse seam (the exit-2 human-presence hard
-    // block) - both spike-proven on the IDE; the latch lines describe what is wired,
+    // block) - both used by the IDE integration; the latch lines describe what is wired,
     // not a platform limit.)
     { src: "dot-gitignore", dst: ".gitignore", projectRoot: true },
   ],

@@ -11171,6 +11171,10 @@
           "mechanism": "cli"
         },
         {
+          "file": "tests/unit/t-kiro-crew-adapter.test.ts",
+          "mechanism": "cli"
+        },
+        {
           "file": "tests/unit/t226-detector-corpus.test.ts",
           "mechanism": "none"
         },
@@ -11263,6 +11267,10 @@
           "mechanism": "cli"
         },
         {
+          "file": "tests/unit/t-kiro-crew-adapter.test.ts",
+          "mechanism": "cli"
+        },
+        {
           "file": "tests/unit/t147-kiro-hook-adapter.test.ts",
           "mechanism": "cli"
         },
@@ -11347,6 +11355,14 @@
           "mechanism": "cli"
         },
         {
+          "file": "tests/unit/t-kiro-crew-adapter.test.ts",
+          "mechanism": "cli"
+        },
+        {
+          "file": "tests/unit/t-kiro-crew-session.test.ts",
+          "mechanism": "cli"
+        },
+        {
           "file": "tests/unit/t-native-hook-project-root.test.ts",
           "mechanism": "cli"
         },
@@ -11380,6 +11396,10 @@
       "coveredBy": [
         {
           "file": "tests/integration/t-guard-recovery-production.test.ts",
+          "mechanism": "cli"
+        },
+        {
+          "file": "tests/unit/t-kiro-crew-adapter.test.ts",
           "mechanism": "cli"
         },
         {
@@ -11479,6 +11499,10 @@
           "mechanism": "none"
         },
         {
+          "file": "tests/unit/t-kiro-crew-session.test.ts",
+          "mechanism": "cli"
+        },
+        {
           "file": "tests/unit/t-native-hook-project-root.test.ts",
           "mechanism": "cli"
         },
@@ -11514,6 +11538,10 @@
       "unitId": "aidlc-state-transition-guard",
       "minMechanism": "none",
       "coveredBy": [
+        {
+          "file": "tests/unit/t-kiro-crew-adapter.test.ts",
+          "mechanism": "cli"
+        },
         {
           "file": "tests/unit/t242-state-transition-guard.test.ts",
           "mechanism": "cli"
@@ -12733,6 +12761,10 @@
       "minMechanism": "cli",
       "coveredBy": [
         {
+          "file": "tests/unit/t-kiro-crew-protocol.test.ts",
+          "mechanism": "cli"
+        },
+        {
           "file": "tests/unit/t190-validate-grid.test.ts",
           "mechanism": "cli"
         },
@@ -13112,6 +13144,10 @@
       "minMechanism": "cli",
       "coveredBy": [
         {
+          "file": "tests/unit/t-kiro-crew-protocol.test.ts",
+          "mechanism": "cli"
+        },
+        {
           "file": "tests/unit/t-recorded-bypass-parity.test.ts",
           "mechanism": "cli"
         },
@@ -13141,6 +13177,10 @@
         },
         {
           "file": "tests/integration/t307-loopback-unitmajor-replay.test.ts",
+          "mechanism": "cli"
+        },
+        {
+          "file": "tests/unit/t-kiro-crew-protocol.test.ts",
           "mechanism": "cli"
         },
         {
@@ -14137,6 +14177,10 @@
           "mechanism": "cli"
         },
         {
+          "file": "tests/unit/t-kiro-crew-protocol.test.ts",
+          "mechanism": "cli"
+        },
+        {
           "file": "tests/unit/t260-unit-lifecycle-receipts.test.ts",
           "mechanism": "cli"
         }
@@ -14510,6 +14554,10 @@
         },
         {
           "file": "tests/integration/t341-composed-scope-durability.test.ts",
+          "mechanism": "cli"
+        },
+        {
+          "file": "tests/unit/t-kiro-crew-setup.test.ts",
           "mechanism": "cli"
         },
         {

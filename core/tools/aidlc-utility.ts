@@ -4058,6 +4058,322 @@ export async function collectDoctorReport(
       label: ".opencode/command/aidlc.md present (/aidlc entry point)",
       fix: projectedFileRepair("opencode", ".opencode/command/aidlc.md"),
     });
+  } else if (harness === ".kiro-crew") {
+    /** Read-only preflight: stamp, PATH, replacing config, receipt/inventory,
+     * registered commands, binding identity and dispatch schema are read before
+     * conductor startup. No host calls or repair writes. Absent prerequisites,
+     * corrupt receipts, drift and unsafe commands fail; partial state warns.
+     * Fail exits 1; warning-only exits 0, but both hold conductor startup until
+     * repaired/reconciled. No ceremony bypass. These snapshots do not prove live
+     * delivery or grant authorization. Keep this core twin independent of setup. */
+    const { homedir } = await import("node:os");
+    const validateCrewDispatchLedger: typeof import("./aidlc-crew-dispatch.ts").validateCrewDispatchLedger =
+      (await import("./aidlc-crew-dispatch.ts")).validateCrewDispatchLedger;
+    const home = process.env.HOME || homedir();
+    const crewHome = resolve(process.env.KIROCREW_HOME || join(home, ".kiro", "crew"));
+    const app = join(crewHome, "apps/aidlc");
+    const quote = (s: string) => `'${s.replaceAll("'", "'\\''")}'`;
+    const setup = (command: string, project = false) =>
+      `bun ${quote(join(app, "setup/aidlc-kiro-crew-setup.ts"))} ${command} --crew-home ${quote(crewHome)}${project ? ` --project-dir ${quote(projectDir)}` : ""}`;
+    const projectFix = `${setup("project", true)} --runtime-root '<absolute runtime/kiro-crew>'`;
+    const bindFix = `${setup("bind", true)} --session-key '<exact key from <home>/session_pid_<pid>.txt line 1>'`;
+    const row = (status: "ok" | "warn" | "fail", what: string, detail: string, fix?: string) => results.push({
+      pass: status === "ok", ...(status === "warn" ? { severity: "warn" as const } : {}),
+      label: `Crew integration — ${what}: ${detail}`, ...(status !== "ok" && fix ? { fix } : {}),
+    });
+    const document = (path: string): Record<string, unknown> => {
+      let raw: string;
+      try { raw = readFileSync(path, "utf8"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return {}; throw error; }
+      const value: unknown = JSON.parse(raw);
+      if (!isPlainObject(value)) throw new Error(`${path} must contain a JSON object`);
+      return value;
+    };
+    const canonical = (path: unknown): string | undefined => {
+      if (typeof path !== "string" || !isAbsolute(path)) return undefined;
+      try { return statSync(path).isDirectory() ? realpathSync(path) : undefined; }
+      catch { return undefined; }
+    };
+    const project = canonical(projectDir);
+    const installDocs = "docs/guide/01-getting-started.md and docs/guide/18-install-and-lifecycle.md (https://github.com/awslabs/aidlc-workflows/tree/main/docs/guide)";
+    const runtime = Bun.which("bun") || Bun.which("aidlc");
+    row(runtime ? "ok" : "fail", "Runtime", runtime
+      ? `bun or aidlc available on PATH (${runtime}); MCP bridge and hooks additionally require bun`
+      : `No runtime on PATH: install bun (project TypeScript engine) or aidlc (native binary). See ${installDocs}.`,
+      `Install bun or native aidlc and expose it on the Crew session PATH. See ${installDocs}.`);
+    let configured = false;
+    try {
+      const stamp = document(join(projectDir, ".kiro-crew/tools/data/aidlc-stamp.json"));
+      configured = stamp.schemaVersion === 1 && stamp.distribution === "kiro-crew" && stamp.harnessDir === ".kiro-crew" &&
+        existsSync(join(projectDir, "aidlc")) && existsSync(join(projectDir, ".kiro-crew/tools/aidlc.ts"));
+    } catch { /* Missing/malformed stamps fail configuration. */ }
+    row(configured ? "ok" : "fail", "Project configured", configured
+      ? `${projectDir} (kiro-crew stamp, project engine and aidlc/ present)`
+      : "missing or invalid kiro-crew project stamp, engine or aidlc/ state", projectFix);
+    let effective: Record<string, unknown> = {};
+    let local: Record<string, unknown> = {};
+    let configError = "";
+    try {
+      const agent = (path: string) => {
+        const value = document(path).agent;
+        if (value === undefined) return {};
+        if (!isPlainObject(value)) throw new Error(`${path} agent must be an object`);
+        return value;
+      };
+      const base = agent(join(crewHome, "config.json"));
+      local = agent(join(crewHome, "config.local.json"));
+      effective = { ...base, ...local };
+    } catch (error) { configError = errorMessage(error); }
+    const roots = effective.subagent_cwd_allowed_roots ?? [];
+    const validRoots = Array.isArray(roots) && roots.every((root) => typeof root === "string");
+    const authorized = !configError && project && validRoots && roots.some((root: string) => {
+      const expanded = root === "~" ? home : root.startsWith("~/") ? join(home, root.slice(2)) : root;
+      const base = canonical(expanded);
+      if (!base) return false;
+      const rel = relative(base, project);
+      return rel === "" || (!isAbsolute(rel) && rel !== ".." && !rel.startsWith(`..${sep}`));
+    });
+    row(authorized ? "ok" : "fail", "Project authorized as cwd root", authorized
+      ? "canonical project is covered by effective agent.subagent_cwd_allowed_roots"
+      : configError ? `cannot read effective Crew config: ${configError}`
+      : !validRoots ? "agent.subagent_cwd_allowed_roots must be a list of strings"
+      : `project not authorized by effective agent.subagent_cwd_allowed_roots${local.subagent_cwd_allowed_roots !== undefined ? " (config.local.json REPLACES the base list)" : ""}`,
+      `${configError ? "Repair config.json/config.local.json as JSON objects, then run " : ""}${projectFix}${local.subagent_cwd_allowed_roots !== undefined ? " --apply-local" : ""}`);
+
+    const { accessSync, constants } = await import("node:fs");
+    const unsafeCommand = (s: string) => /\/bin\/sh|\$\{|__AIDLC_|\0/.test(s);
+    const filePresent = (path: string) => { try { return statSync(path).isFile(); } catch { return false; } };
+    const executable = (path: string) => {
+      try { accessSync(path, constants.X_OK); return statSync(path).isFile(); } catch { return false; }
+    };
+    const digest = (value: unknown): value is string => typeof value === "string" && /^[a-f0-9]{64}$/.test(value);
+    const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
+    const materialized = ["app.json", "mcp.fragment.json"];
+    type Receipt = { bun: string; appRoot: string; crewHome: string; portableInventorySelfHash: string;
+      files: Record<string, { portableSha256: string; materializedSha256: string }> };
+    let receipt: Receipt | undefined;
+    /** Read local receipt and payload before clearance. Invalid provenance fails,
+     * without mutation/bypass. This is not freshness against newer source; never
+     * inspect host secrets or retained bindings as payload. */
+    try {
+      const r = document(join(app, ".aidlc-materialized.json"));
+      if (r.schemaVersion !== 1 || !digest(r.portableInventorySelfHash) ||
+        typeof r.materializedAt !== "string" || !Number.isFinite(Date.parse(r.materializedAt)) ||
+        ![r.bun, r.appRoot, r.crewHome].every((p) => typeof p === "string" && isAbsolute(p) && !unsafeCommand(p)) ||
+        !canonical(app) || canonical(r.appRoot) !== canonical(app) || canonical(r.crewHome) !== canonical(crewHome) ||
+        !isPlainObject(r.files) || Object.keys(r.files).sort().join() !== materialized.join() ||
+        !Object.values(r.files).every((f) => isPlainObject(f) && digest(f.portableSha256) && digest(f.materializedSha256))) {
+        throw new Error("missing or invalid materialization receipt");
+      }
+      receipt = r as unknown as Receipt;
+    } catch { /* Fail closed below, including absence. */ }
+    const appCommand = `${quote(Bun.which("bun") || "<bun>")} '<current source package>/setup/aidlc-kiro-crew-setup.ts' app --apply --crew-home ${quote(crewHome)}`;
+    const appFix = `Run current-source setup app --apply (verifies identity, rematerializes, re-enables; never reinstalls over metadata): ${appCommand}`;
+    const appEnv = `KIROCREW_HOME=${quote(crewHome)} KIRO_HOME=${quote(join(crewHome, "kiro"))}`;
+    const replaceFix = `Stop Crew and other config writers. Run ${appEnv} kirocrew app uninstall aidlc (NEVER --purge-data; preserve data/bindings). Uninstall revokes trust: re-grant Settings → Security → Trusted Apps → aidlc. Obtain the current portable App Kit and rerun current-source setup: ${appCommand}; or use a clean dedicated home.`;
+    let consistent = false;
+    let payloadError = "missing or invalid materialization receipt";
+    try {
+      if (!receipt) throw new Error(payloadError);
+      const inv = document(join(app, "app-inventory.json"));
+      if (inv.schemaVersion !== 1 || inv.owner !== "aidlc" || !Array.isArray(inv.files)) throw new Error("invalid app inventory");
+      const paths = new Set<string>();
+      const hostFiles = ["data", "installed.json", ".app_secret", ".aidlc-materialized.json"];
+      for (const f of inv.files) {
+        if (!isPlainObject(f) || typeof f.path !== "string" || !f.path || isAbsolute(f.path) ||
+          f.path.split("/").some((p) => !p || p === "." || p === "..") || /[\\\0]/.test(f.path) ||
+          hostFiles.includes(f.path.split("/")[0]) || paths.has(f.path) || !digest(f.sha256)) throw new Error("invalid or duplicate inventory path/hash");
+        paths.add(f.path);
+      }
+      const self = inv.files.find((f) => f.path === "app-inventory.json");
+      if (!self || [...materialized, "hooks.fragment.json", "hooks/aidlc-kiro-crew-hook-entry.ts", "mcp/aidlc-mcp-bridge.ts"].some((p) => !paths.has(p))) throw new Error("incomplete app inventory");
+      const selfHash = self.sha256; self.sha256 = "";
+      if (hash(`${JSON.stringify(inv, null, 2)}\n`) !== selfHash || selfHash !== receipt.portableInventorySelfHash) throw new Error("inventory self-hash or receipt provenance mismatch");
+      const visit = (dir: string, prefix = "") => {
+        for (const entry of readdirSync(dir, { withFileTypes: true })) {
+          if (!prefix && hostFiles.includes(entry.name)) continue;
+          const path = `${prefix}${entry.name}`;
+          if (entry.isSymbolicLink()) throw new Error(`symlink payload refused: ${path}`);
+          if (entry.isDirectory() && [...paths].some((p) => p.startsWith(`${path}/`))) visit(join(dir, entry.name), `${path}/`);
+          else if (!entry.isFile() || !paths.has(path)) throw new Error(`unexpected installed payload: ${path}`);
+        }
+      };
+      visit(app);
+      for (const f of inv.files) {
+        if (f.path === "app-inventory.json") continue;
+        const provenance = receipt.files[f.path];
+        if (materialized.includes(f.path) && (!provenance || provenance.portableSha256 !== f.sha256)) throw new Error(`portable provenance mismatch: ${f.path}`);
+        const expected = materialized.includes(f.path) ? provenance.materializedSha256 : f.sha256;
+        if (hash(readFileSync(join(app, f.path))) !== expected) throw new Error(`installed payload hash mismatch: ${f.path}`);
+      }
+      consistent = true;
+    } catch (error) { payloadError = errorMessage(error); }
+    const hookFix = setup("hooks --apply --gateway-stopped");
+    const hookEntry = join(receipt?.appRoot ?? app, "hooks/aidlc-kiro-crew-hook-entry.ts");
+    const pinnedBun = !!receipt && executable(receipt.bun);
+    const events = ["AgentSpawn", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"];
+    if (!receipt) {
+      row("fail", "Hooks registered", "missing or invalid materialization receipt; registration is unverified", `${appFix}. Then separately run ${hookFix}`);
+    } else if (!pinnedBun || !filePresent(hookEntry)) {
+      row("fail", "Hooks registered", "pinned Bun executable or hook-entry file missing/unusable", `${consistent ? appFix : replaceFix}. Then separately run ${hookFix}`);
+    } else try {
+      const hooks = document(join(crewHome, "hooks.json")).hooks;
+      if (hooks !== undefined && !Array.isArray(hooks)) throw new Error("hooks must be an array");
+      const owned = events.map((event) => ({ event, id: `aidlc-${event.replace(/([a-z])([A-Z])/g, "$1-$2").toLowerCase()}` }));
+      const present = Array.isArray(hooks) && owned.some(({ id }) => hooks.some((h) => isPlainObject(h) && h.id === id));
+      const stale = Array.isArray(hooks) && hooks.some((h) => isPlainObject(h) && owned.some(({ id }) => h.id === id) && typeof h.command === "string" && unsafeCommand(h.command));
+      const current = Array.isArray(hooks) && owned.every(({ id, event }) => {
+        const matches = hooks.filter((h) => isPlainObject(h) && h.id === id);
+        const h = matches[0];
+        return matches.length === 1 && h.event === event && h.enabled === true && h.matcher === "" && h.matcher_mode === "glob" &&
+          h.command === `${quote(receipt.bun)} ${quote(hookEntry)} engine adapter kiro-crew ${event}`;
+      });
+      row(current ? "ok" : stale || !present ? "fail" : "warn", "Hooks registered", current
+        ? "five owned IDs route via hook-entry (disk configuration only; does not verify live hook delivery)"
+        : stale ? "stale registration (pre-materialization form)"
+        : present ? "owned IDs present but command form or registration is stale; restore hook-entry routing"
+        : "not registered — five owned hook IDs required", hookFix);
+    } catch {
+      row("warn", "Hooks registered", "cannot read hooks.json; registration is unverified", `Repair ${quote(join(crewHome, "hooks.json"))}, then run ${setup("hooks --apply --gateway-stopped")}`);
+    }
+    const conductor = join(crewHome, "kiro/agents/aidlc--aidlc-crew.json");
+    let installed: Record<string, unknown> = {};
+    let appAbsent = false;
+    try {
+      statSync(join(app, "installed.json")); installed = document(join(app, "installed.json"));
+      if (typeof installed.enabled !== "boolean") throw new Error("invalid installed metadata");
+    } catch (error) {
+      appAbsent = (error as NodeJS.ErrnoException).code === "ENOENT";
+      if (!appAbsent) { consistent = false; payloadError = "invalid or unreadable installed metadata"; }
+    }
+    const boundary = "doctor verifies local consistency, not freshness against a newer source";
+    if (appAbsent) row("fail", "App installed+enabled", `absent — installed.json missing; ${boundary}`, `Obtain the current portable App Kit and run ${appCommand}`);
+    else if (!consistent) row("fail", "App installed+enabled", `installed payload outdated or unverified: ${payloadError}; ${boundary}`, replaceFix);
+    else if (!filePresent(conductor)) row("fail", "App installed+enabled", `expected conductor: ${conductor}; ${boundary}`, appFix);
+    else row(installed.enabled ? "ok" : "warn", "App installed+enabled", installed.enabled
+      ? `enabled metadata, consistent payload and materialized conductor present; ${boundary}`
+      : `installed payload consistent but not enabled; ${boundary}`, appFix);
+    // Snapshot only. Missing/unsafe command, interpreter, bridge or home fails;
+    // no subprocess, effective gateway-HOME inference or bypass.
+    let bridgePinned = false;
+    try {
+      const servers = document(join(crewHome, "kiro/agents/kirocrew.json")).mcpServers;
+      const spec = isPlainObject(servers) ? servers["aidlc:engine"] : undefined;
+      if (receipt && pinnedBun && isPlainObject(spec) && !unsafeCommand(JSON.stringify(spec)) && spec.command === receipt.bun &&
+        Array.isArray(spec.args) && spec.args.every((arg) => typeof arg === "string")) {
+        const bridge = join(receipt.appRoot, "mcp/aidlc-mcp-bridge.ts");
+        const homes = spec.args.filter((arg) => arg === "--crew-home");
+        bridgePinned = spec.args[0] === bridge && filePresent(bridge) && homes.length === 1 && spec.args[spec.args.indexOf("--crew-home") + 1] === receipt.crewHome;
+      }
+    } catch { /* Missing/unreadable is not pinned. */ }
+    row(bridgePinned ? "ok" : "fail", "Bridge runtime pinned", bridgePinned
+      ? "registered aidlc:engine uses receipt Bun, existing bridge and explicit Crew home (disk configuration only)"
+      : "registered aidlc:engine is missing, unsafe or not pinned to receipt Bun/bridge/Crew home", appAbsent || consistent ? appFix : replaceFix);
+    const trustMarkers = [effective.apps_trusted, effective.apps_trusted_local];
+    const validTrust = !configError && trustMarkers.every((grants) =>
+      grants === undefined || (Array.isArray(grants) && grants.every((grant) => typeof grant === "string")));
+    const trusted = validTrust && trustMarkers.every((grants) =>
+      Array.isArray(grants) && grants.includes("aidlc"));
+    const trustAbsent = validTrust && trustMarkers.every((grants) =>
+      grants === undefined || (Array.isArray(grants) && !grants.includes("aidlc")));
+    row(trusted ? "ok" : trustAbsent ? "fail" : "warn", "Trust granted", trusted
+      ? "local-app grant and local-consent marker present (never blanket trust)"
+      : "missing or unverified local-app trust grant",
+      'Operator-only grant via Settings → Security → Trusted Apps → aidlc. For this local App Kit the equivalent entries are agent.apps_trusted: ["aidlc"] AND agent.apps_trusted_local: ["aidlc"] (append, preserving other grants). The app does not self-grant: Crew validates app identity and consent. Never set apps_allow_third_party. ' + setup("trust"));
+
+    /** Read local map/PID records before binding decisions, independently of app
+     * setup. No-follow regular reads bound maps/bindings to 4 MiB, PID to 4 KiB.
+     * Bad maps warn and contribute no keys; malformed PID records are skipped.
+     * Unknown hashes warn, corrupt bindings fail. An override restricts inspection
+     * to that session. No write, deletion, authentication claim or bypass. */
+    const { openSync, closeSync, fstatSync, readSync } = await import("node:fs");
+    const identityText = (path: string, limit = 4096): string => {
+      const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const stat = fstatSync(fd);
+        if (!stat.isFile() || stat.size > limit) throw new Error("invalid identity record");
+        const buffer = Buffer.alloc(limit + 1);
+        const size = readSync(fd, buffer, 0, buffer.length, 0);
+        if (size > limit) throw new Error("oversize identity record");
+        return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, size));
+      } finally { closeSync(fd); }
+    };
+    const crewRecordedKeys = new Set<string>();
+    const validKey = (key: string) => !!key.trim() && !/[\0\r\n]/.test(key);
+    try {
+      const map: unknown = JSON.parse(identityText(join(crewHome, "session_map.json"), 4 * 1024 * 1024));
+      if (!isPlainObject(map)) throw new Error("expected an object");
+      for (const key of Object.keys(map)) if (validKey(key)) crewRecordedKeys.add(key);
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "ENOENT") process.stderr.write(`Cannot bind Crew session: cannot read Crew session records at ${join(crewHome, "session_map.json")}; session-map keys ignored.\n`);
+    }
+    try {
+      for (const file of readdirSync(crewHome)) {
+        const match = /^session_pid_(\d+)\.txt$/.exec(file);
+        if (!match || !Number.isSafeInteger(Number(match[1])) || Number(match[1]) <= 1) continue;
+        try {
+          const lines = identityText(join(crewHome, file)).replace(/\n$/, "").split("\n");
+          if (lines.length > 2 || !validKey(lines[0]) || (lines.length === 2 && !validKey(lines[1]))) continue;
+          if (lines.length === 2 && process.platform === "linux") {
+            try {
+              const stat = readFileSync(`/proc/${Number(match[1])}/stat`, "utf8");
+              const live = stat.slice(stat.lastIndexOf(")") + 2).split(/\s+/)[19];
+              if (live && live !== lines[1]) continue;
+            } catch { /* Unknown start token is not a mismatch. */ }
+          }
+          crewRecordedKeys.add(lines[0]);
+        } catch { /* Malformed PID records supply no identity. */ }
+      }
+    } catch { /* Missing/unreadable home supplies no PID keys. */ }
+    const recordedHashes = new Set([...crewRecordedKeys].map((key) => hash(key)));
+    let bound = false;
+    let unverified = false;
+    const corruptBindings: string[] = [];
+    const bindings = join(app, "data/bindings");
+    const override = process.env.AIDLC_SESSION_OVERRIDE;
+    try {
+      const files = existsSync(bindings) ? readdirSync(bindings).filter((f) => override
+        ? /^crew-[a-f0-9]{64}$/.test(override) && f === `${override.slice(5)}.json`
+        : f.endsWith(".json")).sort() : [];
+      for (const file of files) {
+        try {
+          const b = JSON.parse(identityText(join(bindings, file), 4 * 1024 * 1024)) as unknown;
+          if (!isPlainObject(b) || typeof b.projectDir !== "string") throw new Error("unknown binding target");
+          if (canonical(b.projectDir) !== project || !project) continue;
+          if (!/^[a-f0-9]{64}\.json$/.test(file) || typeof b.boundAt !== "string" || !Number.isFinite(Date.parse(b.boundAt))) throw new Error("invalid binding schema");
+          if (recordedHashes.has(file.slice(0, -5))) bound = true;
+          else unverified = true;
+        } catch { corruptBindings.push(file); }
+      }
+    } catch { corruptBindings.push(bindings); }
+    // Unknown targets cannot be dismissed as another project's corruption.
+    // No binding warns because first aidlc_status binds before preflight.
+    row(corruptBindings.length ? "fail" : unverified ? "warn" : bound ? "ok" : "warn", "Conversation bound", corruptBindings.length
+      ? `corrupt or unreadable project binding (target matches or cannot be determined): ${corruptBindings.join(", ")}`
+      : unverified ? "orphaned or unverified binding (no matching Crew session record); if this conversation is live, rebind from its real key"
+      : bound ? override ? "current session binding targets this project and matches a Crew session record (local routing only)" : "at least one binding targets this project and matches a Crew session record; current dashboard slot is not verified by doctor"
+      : "not bound — the conductor's first aidlc_status call binds, or run setup bind",
+      `${corruptBindings.length ? "Preserve and inspect the named binding(s); rebind the affected raw session key. " : ""}${bindFix}`);
+    // Age is advisory, never expiry. Only explicit reconciliation settles work.
+    const sessions = join(projectDir, "aidlc/.aidlc-sessions");
+    const ledgerIssues: string[] = [];
+    const now = Date.now();
+    try {
+      const files = existsSync(sessions) ? readdirSync(sessions).filter((f) => f.endsWith(".crew-dispatch.json")).sort() : [];
+      for (const file of files) {
+        try {
+          const ledger: unknown = JSON.parse(readFileSync(join(sessions, file), "utf8"));
+          validateCrewDispatchLedger(ledger, file.slice(0, -".crew-dispatch.json".length));
+          if (ledger.intents.length) ledgerIssues.push(`${file}: unresolved dispatch intents; reconcile before redispatch (reconciliationRequired)`);
+          if (ledger.outstanding.some((entry) => now - Date.parse(entry.dispatchedAt) > 24 * 60 * 60 * 1000)) {
+            ledgerIssues.push(`${file}: outstanding children may suppress Stop nudges (older than 24 hours)`);
+          }
+        } catch { ledgerIssues.push(`${file}: malformed or unreadable dispatch ledger; preserve and reconcile before dispatch`); }
+      }
+    } catch { ledgerIssues.push("cannot read dispatch ledgers; preserve and reconcile before dispatch"); }
+    row(ledgerIssues.length ? "warn" : "ok", "Dispatch ledger health", ledgerIssues.length
+      ? ledgerIssues.join("; ") : "no unresolved intents or outstanding children older than 24 hours",
+      `Inspect saved Crew runs and run \`${aidlcInvocation()} engine crew-dispatch reconcile --session <session-from-ledger-filename> --json\`; make an explicit stop/carry decision before redispatch. Doctor never settles children or releases dependents.`);
   } else {
     const settingsPath = join(projectDir, harness, "settings.json");
     results.push({
@@ -7256,7 +7572,7 @@ function handleIntentCreate(projectDir: string, flags: Record<string, string>): 
       return;
     }
 
-    // (2) MINT THE INTENT. SPIKE (date-prefix): the dir name is `<YYMMDD>-<label>`.
+    // (2) Intent directory naming: the dir name is `<YYMMDD>-<label>`.
     // TWO seams, by the three-concerns split:
     //   • KNOWLEDGE→LLM: the conductor passes a short 2-3 word essence via --label
     //     ("simple calc"). This is the dir-name label — the readable, condensed half

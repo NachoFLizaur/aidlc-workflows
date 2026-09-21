@@ -191,6 +191,7 @@ const FRESH_SESSION_TOKENS: Record<string, string[]> = {
   opencode: ["restart OpenCode", "`/aidlc`"],
   copilot: ["new Copilot CLI session", "new VS Code agent chat", "`/aidlc`"],
   cursor: ["new Cursor chat", "`/aidlc`"],
+  "kiro-crew": ["new Kiro Crew dashboard session", "`aidlc-crew`"],
 };
 
 function stageTableRows(body: string): string[] {

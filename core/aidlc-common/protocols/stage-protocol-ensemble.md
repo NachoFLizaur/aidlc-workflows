@@ -171,6 +171,18 @@ If a Task tool call fails (timeout, error, or returns truncated/incomplete outpu
 
 ---
 
+### Kiro Crew
+
+**Pipeline receipt rule:** after each successful link, classify/correlate its completion envelope, settle transport, then run `{{INVOKE}} engine log link --stage "<directive.stage>" --link "<agent>"` BEFORE the next dispatch. Preserve declared order, `directive.pipeline.completed` recovery, `--repo "<repo>"`, `--single` and stage-specific handoff evidence. Link names are engine slugs, not Crew dispatch names.
+
+Use `{{HARNESS_DIR}}/skills/aidlc/delegation.md`: §1 resolves role-map names; §2 requires intend → `spawn_run` → confirm → END TURN; §3 classifies envelopes; §4 settles transport before engine evidence. Preserve §5's topology and §11's paths-only return/context contract. For `subagent`, dispatch the lead draft, ready supports in ONE `spawn_run {tasks:[…], agents:[…], cwd}` call with matching ordered arrays and mutually blind briefs, then the lead to integrate. For `pipeline`, dispatch only the first missing link, advancing after its receipt. For `mob`, batch supports against the draft, then lead integration and §5's bounded objection triage. Authorized rework uses `spawn_continue`; reviewer NOT-READY returns to the lead alone. Continuation briefs are at most 5,000 characters: send a concise delta and existing paths, preserving ownership, constraints and receipt instructions. If they cannot fit, stop for explicit recovery, never replace the child silently. No ceremony bypass. Supports write their own contribution files with first-line `**Collaborator:** <agent-slug>` using engine identity; the lead owns artifacts and preserves dissent. Inline mode stays in the conductor.
+
+**Waiting and release.** After an envelope resumes the conductor, use bounded `{{INVOKE}} engine orchestrate wait --stage <directive.stage> --for collaborators --timeout 90` when filesystem evidence is missing (`--for artifacts` for the lead; preserve `--unit`). Each call uses a positive timeout ≤90 seconds, below the bridge's 120-second bound. This is readiness, not host completion or a receipt. No shell loops, sleeps, dispatch-turn wait or busy-polling: a waiting result holds work for a later envelope or visible missing-evidence report. Correlate every completion with saved dispatch records before settlement. A mid-wave chunk never releases dependents, even when files are ready or the ledger is empty. Final delivery AND every prerequisite's engine evidence are required. Failed/stopped/lost work halts the wave; preserve successful outputs, report failure and never mint success or retry silently.
+
+Read correlated final delivery and current engine evidence BEFORE dependent dispatch or lifecycle reports. Missing/ambiguous evidence holds the wave; no Crew setting disables it, and shared recovery settings do not supply missing host completion. Only the conductor dispatches. Missing dispatch or binding stops explicitly; no Kiro-native, other-harness or inline substitution.
+
+---
+
 ### GitHub Copilot
 
 **Pipeline receipt rule:** after every pipeline delegation returns, run `bun {{HARNESS_DIR}}/tools/aidlc-log.ts link --stage "<directive.stage>" --link "<agent>"` before the next delegation; add `--repo "<repo>"` for multi-repo chains, add `--single` when `directive.single === true`, and resume from `directive.pipeline.completed`.

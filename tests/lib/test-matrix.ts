@@ -11,6 +11,7 @@ export const TEST_MATRIX_LIVE_GATES = [
   "AIDLC_KIRO_TUI_LIVE", "AIDLC_CODEX_EXEC_LIVE", "AIDLC_COPILOT_EXEC_LIVE",
   "AIDLC_CURSOR_RUN_LIVE", "AIDLC_KIRO_IDE_LIVE", "AIDLC_OPENCODE_RUN_LIVE",
   "AIDLC_RELEASE_CONTRACT_LIVE",
+  "AIDLC_KIRO_CREW_LIVE",
 ] as const;
 export type AllowedLiveGate = typeof TEST_MATRIX_LIVE_GATES[number];
 export type TestMatrixBackend = "bun" | "tmux" | "none";

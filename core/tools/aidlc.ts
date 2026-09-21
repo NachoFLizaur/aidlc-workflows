@@ -121,6 +121,7 @@ export const TOOLS = {
   attest: "aidlc-attest.ts",
   audit: "aidlc-audit.ts",
   bolt: "aidlc-bolt.ts",
+  crewDispatch: "aidlc-crew-dispatch.ts",
   graph: "aidlc-graph.ts",
   doctor: "aidlc-doctor.ts",
   init: "aidlc-init.ts",
@@ -211,6 +212,16 @@ export const SYSTEM_NAMESPACE_HELP: NamespaceHelpOptions = {
 
 // ROUTES_TABLE_START
 export const ROUTES: readonly Route[] = [
+  {
+    id: "crew-dispatch",
+    group: "crew-dispatch",
+    kind: "noun-passthrough",
+    classification: "passthrough",
+    verbs: ["intend", "confirm", "unknown", "settle", "continue", "wave-status", "reconcile", "list"],
+    tool: TOOLS.crewDispatch,
+    ...HIDDEN_ENGINE,
+    all: ["crew-dispatch <intend|confirm|unknown|settle|continue|wave-status|reconcile|list> [args]"],
+  },
   {
     id: "top-orchestrate",
     group: "top",
@@ -1197,7 +1208,7 @@ function toolsDir(): string {
   return dispatcherDir();
 }
 
-type AdapterHarness = "codex" | "copilot" | "cursor" | "kiro" | "kiro-ide";
+type AdapterHarness = "codex" | "copilot" | "cursor" | "kiro" | "kiro-ide" | "kiro-crew";
 
 const ADAPTER_HARNESS_LEAF: Record<AdapterHarness, string> = {
   codex: ".codex",
@@ -1205,6 +1216,7 @@ const ADAPTER_HARNESS_LEAF: Record<AdapterHarness, string> = {
   cursor: ".cursor",
   kiro: ".kiro",
   "kiro-ide": ".kiro",
+  "kiro-crew": ".kiro-crew",
 };
 
 function isAdapterHarness(value: string): value is AdapterHarness {
@@ -1215,6 +1227,7 @@ function adapterFile(harness: AdapterHarness): string {
   if (harness === "codex") return "aidlc-codex-adapter.ts";
   if (harness === "copilot") return "aidlc-copilot-adapter.ts";
   if (harness === "cursor") return "aidlc-cursor-adapter.ts";
+  if (harness === "kiro-crew") return "aidlc-kiro-crew-adapter.ts";
   return "aidlc-kiro-adapter.ts";
 }
 
@@ -2106,6 +2119,7 @@ const DELEGATES: Record<ToolFile, () => Promise<DelegateModule>> = {
   "aidlc-audit.ts": () => import("./aidlc-audit.ts"),
   "aidlc-bolt.ts": () => import("./aidlc-bolt.ts"),
   "aidlc-completions.ts": () => import("./aidlc-completions.ts"),
+  "aidlc-crew-dispatch.ts": () => import("./aidlc-crew-dispatch.ts"),
   "aidlc-doctor.ts": () => import("./aidlc-doctor.ts"),
   "aidlc-graph.ts": () => import("./aidlc-graph.ts"),
   "aidlc-init.ts": () => import("./aidlc-init.ts"),

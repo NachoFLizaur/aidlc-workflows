@@ -15,6 +15,7 @@ interface Family {
 const REPO_ROOT = resolve(import.meta.dir, "..");
 const hostedPlatforms = ["linux", "darwin", "win32"] as const;
 export const FAMILIES = {
+  "kiro-crew": { env: { AIDLC_KIRO_CREW_LIVE: "1" }, platforms: [], hosting: "excluded", requireCoverage: true, reason: "requires an operator-controlled isolated Crew home and local App Kit registration; no hosted host-isolation contract" },
   "kiro-ide": { env: { AIDLC_KIRO_IDE_LIVE: "1" }, platforms: [], hosting: "excluded", requireCoverage: true, reason: "needs a dedicated isolated Windows desktop host with a separate low-privilege Kiro identity; tracked as a follow-up" },
   "kiro-tui": { env: { AIDLC_KIRO_TUI_LIVE: "1", AIDLC_TUI_LIVE: "1" }, platforms: [], hosting: "excluded", requireCoverage: true, reason: "needs a dedicated isolated Windows desktop host with a separate low-privilege Kiro identity; tracked as a follow-up" },
   "kiro-acp": { env: { AIDLC_KIRO_ACP_LIVE: "1" }, platforms: [], hosting: "excluded", requireCoverage: true, reason: "needs a dedicated isolated Windows desktop host with a separate low-privilege Kiro identity; tracked as a follow-up" },

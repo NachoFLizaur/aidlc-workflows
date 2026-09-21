@@ -970,6 +970,7 @@ describe("t299 (5) authored consumers use the same contract", () => {
       "cursor",
       "opencode",
       "copilot",
+      "kiro-crew",
     ]) {
       const skill = read(`harness/${harness}/skills/aidlc/SKILL.md`);
       expect(skill, harness).toContain(

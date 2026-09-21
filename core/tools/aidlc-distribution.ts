@@ -34,6 +34,8 @@ export type ProjectionDescriptor = {
   harnessDir: string;
   onboarding?: string;
   managedDirectories: string[];
+  /** Runtime-only top-level directories, not project-owned content. Absent means none. */
+  hostDirectories?: string[];
   legacyManagedFileHashes?: Record<string, string[]>;
   rootIntegrations: RootIntegration[];
 };
@@ -104,11 +106,18 @@ export function isSafeOnboardingPath(value: unknown, harnessDir: string): value 
     value.startsWith(`${harnessDir}/`);
 }
 
+/**
+ * Validate declared ownership against filesystem entries before config plans
+ * project writes or release packaging accepts a runtime. Invalid declarations,
+ * overlaps and host-tree links/special files throw; there is no force bypass.
+ * Only installed-project rereads may allow missing host directories: declarations
+ * are still checked, and any present host tree must still be a regular tree.
+ */
 export function validateProjectionDescriptor(
   root: string,
   stamp: ProjectionStamp,
   descriptor: ProjectionDescriptor,
-  options: { allowMissingRootIntegrations?: boolean } = {},
+  options: { allowMissingRootIntegrations?: boolean; allowMissingHostDirectories?: boolean } = {},
 ): void {
   if (!VERSION_ID.test(stamp.frameworkVersion)) {
     throw new Error(`${root}: projection stamp has an invalid framework version`);
@@ -148,11 +157,15 @@ export function validateProjectionDescriptor(
       throw new Error(`${root}: onboarding file is missing: ${safe}`);
     }
   }
-  if (!Array.isArray(descriptor.managedDirectories) || !Array.isArray(descriptor.rootIntegrations)) {
+  if (
+    !Array.isArray(descriptor.managedDirectories) ||
+    !Array.isArray(descriptor.rootIntegrations) ||
+    (descriptor.hostDirectories !== undefined && !Array.isArray(descriptor.hostDirectories))
+  ) {
     throw new Error(`${root}: projection descriptor lists are invalid`);
   }
   const declared = new Set<string>();
-  const declare = (safe: string): void => {
+  const claimProjectedPath = (safe: string): void => {
     if (declared.has(safe)) throw new Error(`${root}: duplicate projected path ${safe}`);
     const overlap = [...declared].find((prior) =>
       safe.startsWith(`${prior}/`) || prior.startsWith(`${safe}/`)
@@ -164,12 +177,27 @@ export function validateProjectionDescriptor(
   };
   for (const directory of descriptor.managedDirectories) {
     const safe = safeRelativePath(directory, "managed directory", true);
-    declare(safe);
+    claimProjectedPath(safe);
     assertProjectionPathHasNoSymlinks(root, safe);
     const path = join(root, safe);
     if (!existsSync(path) || !lstatSync(path).isDirectory()) {
       throw new Error(`${root}: managed directory is missing or invalid: ${safe}`);
     }
+  }
+  for (const directory of descriptor.hostDirectories ?? []) {
+    const safe = safeRelativePath(directory, "host directory", true);
+    claimProjectedPath(safe);
+    if (safe === stamp.harnessDir) {
+      throw new Error(`${root}: harness directory cannot be host-only: ${safe}`);
+    }
+    assertProjectionPathHasNoSymlinks(root, safe);
+    const path = join(root, safe);
+    const stat = lstatSync(path, { throwIfNoEntry: false });
+    if (!stat && options.allowMissingHostDirectories) continue;
+    if (!stat?.isDirectory()) {
+      throw new Error(`${root}: host directory is missing or invalid: ${safe}`);
+    }
+    walkFiles(path);
   }
   if (descriptor.legacyManagedFileHashes !== undefined) {
     const signatures = descriptor.legacyManagedFileHashes;
@@ -210,7 +238,7 @@ export function validateProjectionDescriptor(
     ) {
       throw new Error(`${root}: ${safe} has an invalid shared mode`);
     }
-    declare(safe);
+    claimProjectedPath(safe);
     assertProjectionPathHasNoSymlinks(root, safe);
     const path = join(root, safe);
     if (
@@ -304,6 +332,7 @@ export function projectionFiles(root: string): {
   validateProjectionDescriptor(root, stamp, descriptor);
   const allowedTopLevel = new Set([
     ...descriptor.managedDirectories,
+    ...(descriptor.hostDirectories ?? []),
     ...descriptor.rootIntegrations.map((item) => item.path.split(/[\\/]/)[0]),
   ]);
   const unexpected = readdirSync(root).filter((entry) => !allowedTopLevel.has(entry));

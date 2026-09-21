@@ -87,6 +87,7 @@ const SKILL_REL: Record<string, string> = {
   kiro: ".kiro/skills",
   "kiro-ide": ".kiro/skills",
   opencode: ".aidlc/skills",
+  "kiro-crew": ".kiro-crew/skills",
 };
 
 const HARNESSES = HARNESS_NAMES.map((name) => {

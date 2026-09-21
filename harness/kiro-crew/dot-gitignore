@@ -1,0 +1,52 @@
+# Logs and local build output
+logs
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+node_modules
+dist
+dist-ssr
+*.local
+
+# Editor state
+.vscode/*
+!.vscode/extensions.json
+.idea
+.DS_Store
+*.suo
+*.ntvs*
+*.njsproj
+*.sln
+*.sw?
+
+# Per-user cursors and machine-local runtime state; shared records stay committed.
+aidlc/active-space
+aidlc/spaces/*/intents/active-intent
+aidlc/.aidlc-clone-id
+aidlc/.aidlc-unit-scope.json
+aidlc/.aidlc-unit-parked
+aidlc/.aidlc-claim-generations.json
+aidlc/.aidlc-unit-participant
+aidlc/.aidlc-claim-registry.json
+aidlc/.aidlc-unit-releases/
+aidlc/.aidlc-unit-merges/
+aidlc/.aidlc-active-space-*.tmp
+aidlc/.aidlc-sessions/
+aidlc/spaces/*/intents/.aidlc-*
+**/aidlc/spaces/*/intents/**/.aidlc-engine/
+**/aidlc/spaces/*/intents/**/.aidlc-sensors/
+aidlc/spaces/*/knowledge/documentkb/.journal/
+aidlc/spaces/*/knowledge/.sources.local.json
+aidlc/spaces/*/intents/*/runtime-graph.json
+aidlc/spaces/*/intents/*/.aidlc-*
+aidlc/diagnostics/
+
+# COMMITTED (NOT ignored; do not add ignore rules for these):
+# aidlc/spaces/*/memory/** · aidlc/spaces/*/codekb/** ·
+# aidlc/spaces/*/intents/intents.json · aidlc/spaces/*/intents/*/aidlc-state.md ·
+# aidlc/spaces/*/intents/*/audit/*.md ·
+# aidlc/spaces/*/intents/*/<phase>/<stage>/*.md (artifacts + diary).
+# Audit shards stay separate per clone; no .gitattributes merge=union.

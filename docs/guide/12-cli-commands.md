@@ -14,6 +14,12 @@ diagnostic and lifecycle routes.
 > [Cursor](harnesses/cursor.md), [opencode](harnesses/opencode.md), and
 > [GitHub Copilot](harnesses/copilot.md) harness guides.
 
+On [Kiro Crew](harnesses/kiro-crew.md#daily-use), send these requests in plain
+text to **aidlc-crew** in the selected project's dashboard chat. The conductor
+uses `aidlc_engine` for engine operations; public `aidlc config` changes are
+operator terminal actions, not bridge calls. Crew stage runners are explicit
+resources, not native slash commands.
+
 > **Cursor shortcuts.** Cursor also exposes `/aidlc-status`,
 > `/aidlc-jump --stage <slug|#>` (or `--phase <name|#>`), and
 > `/aidlc-scope <name>` as native skills. They package the matching `/aidlc`

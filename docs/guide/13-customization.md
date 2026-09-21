@@ -20,6 +20,12 @@ AI-DLC is designed to adapt to your team's needs. This chapter covers settings o
 > [AI-DLC on opencode](harnesses/opencode.md), and
 > [AI-DLC on GitHub Copilot](harnesses/copilot.md) for each harness's surfaces.
 
+Kiro Crew keeps the engine in `.kiro-crew/` and host configuration in the Crew
+home. Backend/model access belongs to Crew; AI-DLC model/effort policy is not
+projected into Crew agent pins. Rules use engine context and explicit project
+resources. Public `aidlc config` changes must run in your terminal, not through
+the conductor's MCP bridge. See [Crew daily use](harnesses/kiro-crew.md#daily-use).
+
 ---
 
 ## Settings Overrides (`settings.local.json`)

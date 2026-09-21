@@ -149,6 +149,12 @@ export type HarnessManifest = {
   harnessDir: string;
   /** Explicit project-root reconciliation policies consumed by `aidlc config`. */
   rootIntegrations: RootIntegration[];
+  /**
+   * Host-only top-level directories emitted into both runtime channels, never
+   * copied into projects by config. Names must be safe, unique and disjoint
+   * from the engine directory and root integrations; omitted means none.
+   */
+  hostDirectories?: string[];
   /** Native-invocation-only project-root integrations such as host trust seeds. */
   nativeRootIntegrations?: NativeRootIntegration[];
   /**
@@ -164,7 +170,7 @@ export type HarnessManifest = {
    * new harness picks its projection shape in its manifest - the packager
    * never infers it from the harness name.
    */
-  tierFlavor: "claude" | "codex" | "kiro" | "opencode" | "copilot" | "cursor";
+  tierFlavor: "claude" | "codex" | "kiro" | "kiro-crew" | "opencode" | "copilot" | "cursor";
   /** core/<src> → <harnessDir>/<dst> projections. */
   coreDirs: DirMap[];
   /** harness/<name>/<src> → <harnessDir>/<dst> authored-file copies. */

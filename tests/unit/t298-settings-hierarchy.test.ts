@@ -32,7 +32,7 @@ import {
   projectSettingsPath,
   resolveAidlcSettings,
 } from "../../core/tools/aidlc-settings.ts";
-import { REPO_ROOT } from "../harness/fixtures.ts";
+import { createTestProject, REPO_ROOT } from "../harness/fixtures.ts";
 
 setDefaultTimeout(NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
 
@@ -121,6 +121,13 @@ function install(): string {
 }
 
 describe("t298 aidlc.settings hierarchy", () => {
+  test("Crew and Kiro retain distinct model-map keys through settings normalization", () => {
+    const project = createTestProject(); temporary.push(project);
+    const value = normalizeAidlcSettings({ schemaVersion: 1, models: { schemaVersion: 1, agents: { architect: { model: { "kiro-crew": "crew/model", kiro: "kiro/model" } } } } }, "project", join(project, "aidlc.settings.json"));
+    expect(modelPolicyForHarness(value.models ?? null, "kiro-crew")?.agents?.architect?.model).toBe("crew/model");
+    expect(modelPolicyForHarness(value.models ?? null, "kiro")?.agents?.architect?.model).toBe("kiro/model");
+    expect(AIDLC_SETTINGS_SCHEMA.properties.models.properties.agents.additionalProperties.properties.model.properties["kiro-crew"]).toEqual({ type: "string", minLength: 1 });
+  });
   test("the generated schema ships identically in every harness", () => {
     for (const [harness, harnessDir] of [
       ["claude", ".claude"],
@@ -130,6 +137,7 @@ describe("t298 aidlc.settings hierarchy", () => {
       ["kiro", ".kiro"],
       ["kiro-ide", ".kiro"],
       ["opencode", ".aidlc"],
+      ["kiro-crew", ".kiro-crew"],
     ]) {
       expect(JSON.parse(readFileSync(
         join(

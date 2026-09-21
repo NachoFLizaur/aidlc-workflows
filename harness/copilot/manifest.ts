@@ -3,8 +3,7 @@
 // ONE dist serves BOTH Copilot surfaces — Copilot CLI (1.0.74+) and VS Code
 // agent mode (1.130+) — because GitHub converged them on the same project
 // discovery paths: .github/skills/, .github/agents/, .github/hooks/, and the
-// root AGENTS.md are read identically by both (compat spike, 10 live CLI
-// probes + IDE parser extraction in the compatibility-spike evidence). Splitting
+// root AGENTS.md are shared by the CLI and IDE. Splitting
 // cli/ide harnesses would ship two dists competing for the
 // same .github file paths; the divergences are authoring rules instead:
 //   - hooks registered under PascalCase event names → BOTH surfaces deliver
@@ -73,6 +72,8 @@ const manifest: HarnessManifest = {
           "sha256:55b31ba55f6e7ebc47fe76a00039e2ec16e020503fb63791cbd8665438ff32ac",
           // The pre-Guards shipped variant (the onboarding gained its Guards section).
           "sha256:7a3a19981ba7a3c447b54eb0d0b1e96f8c9931687595967103cb5dfbb3c2b309",
+          // Keep v2.9.0 unmarked onboarding recognizable.
+          "sha256:c39d454868e4c7ca77497c86c18119de58ee343b33c04c52d09072f4b5c578ea",
           // The pre-skill-prefix shipped variant (#1341: user-typed skill
           // names rendered the shell invocation instead of the skill command).
           "sha256:622ebad60ee4fed6a2a9811e7378ccbff6b76d651aaee00fd079b02471d8cf06",

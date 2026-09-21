@@ -24,6 +24,7 @@ type HarnessCapabilities = {
     harnessDist: string;
   };
   rootFiles: readonly string[];
+  hostDirectories: readonly string[];
   skillsRoot: string;
   plugin: {
     kind: "store" | "kiro" | "kiro-ide" | "cursor";
@@ -37,6 +38,7 @@ type HarnessCapabilities = {
     | "cursor-rule"
     | "kiro-resources"
     | "kiro-steering"
+    | "engine-context"
     | "opencode-instructions";
   kiroAgentJson: boolean;
   ideAgentTools: boolean;
@@ -47,6 +49,23 @@ type HarnessCapabilities = {
 // explicit makes harness-specific test selection reviewable and prevents a new
 // manifest from inheriting an accidental default.
 const HARNESS_CAPABILITIES = {
+  "kiro-crew": {
+    harnessDir: ".kiro-crew",
+    onboarding: {
+      mode: "manifest",
+      fills: "onboarding.fills.ts",
+      dist: ".kiro-crew/AGENTS.md",
+      harnessDist: ".kiro-crew/AGENTS.md",
+    },
+    rootFiles: [".gitignore"],
+    hostDirectories: ["kiro-crew-app"],
+    skillsRoot: ".kiro-crew/skills",
+    plugin: { kind: "store", manifestDir: ".kiro-crew-plugin", wiringFile: "hooks/hooks.json" },
+    memoryInclude: "engine-context",
+    kiroAgentJson: false,
+    ideAgentTools: false,
+    reviewerScopeRegistration: "unsupported",
+  },
   claude: {
     harnessDir: ".claude",
     onboarding: {
@@ -56,6 +75,7 @@ const HARNESS_CAPABILITIES = {
       harnessDist: ".claude/CLAUDE.md",
     },
     rootFiles: [".gitignore", ".mcp.json"],
+    hostDirectories: [],
     skillsRoot: ".claude/skills",
     plugin: {
       kind: "store",
@@ -76,6 +96,7 @@ const HARNESS_CAPABILITIES = {
       harnessDist: ".codex/onboarding.md",
     },
     rootFiles: [".gitignore", "AGENTS.md"],
+    hostDirectories: [],
     skillsRoot: ".agents/skills",
     plugin: {
       kind: "store",
@@ -96,6 +117,7 @@ const HARNESS_CAPABILITIES = {
       harnessDist: "AGENTS.md",
     },
     rootFiles: [".gitignore", "AGENTS.md"],
+    hostDirectories: [],
     skillsRoot: ".github/skills",
     plugin: {
       kind: "store",
@@ -116,6 +138,7 @@ const HARNESS_CAPABILITIES = {
       harnessDist: ".cursor/rules/aidlc-onboarding.mdc",
     },
     rootFiles: [".gitignore", "AGENTS.md", "install.ts"],
+    hostDirectories: [],
     skillsRoot: ".cursor/skills",
     plugin: {
       kind: "cursor",
@@ -136,6 +159,7 @@ const HARNESS_CAPABILITIES = {
       harnessDist: ".kiro/steering/aidlc-onboarding.md",
     },
     rootFiles: [".gitignore", "AGENTS.md"],
+    hostDirectories: [],
     skillsRoot: ".kiro/skills",
     plugin: {
       kind: "kiro-ide",
@@ -156,6 +180,7 @@ const HARNESS_CAPABILITIES = {
       harnessDist: ".kiro/steering/aidlc-onboarding.md",
     },
     rootFiles: [".gitignore", "AGENTS.md"],
+    hostDirectories: [],
     skillsRoot: ".kiro/skills",
     plugin: {
       kind: "kiro",
@@ -176,6 +201,7 @@ const HARNESS_CAPABILITIES = {
       harnessDist: ".aidlc/onboarding.md",
     },
     rootFiles: [".gitignore", "AGENTS.md", "opencode.json"],
+    hostDirectories: [],
     skillsRoot: ".aidlc/skills",
     plugin: {
       kind: "store",
@@ -270,6 +296,13 @@ function validateManifest(
   }
   if (onboarding?.projectRoot && !capabilities.rootFiles.includes(onboarding.dst)) {
     fail(name, `project-root onboarding "${onboarding.dst}" is absent from rootFiles metadata`);
+  }
+  if ([...(manifest.hostDirectories ?? [])].sort().join("\n") !==
+    [...capabilities.hostDirectories].sort().join("\n")) {
+    fail(name, "hostDirectories does not agree with the manifest");
+  }
+  if (capabilities.hostDirectories.some((directory) => capabilities.rootFiles.includes(directory))) {
+    fail(name, "hostDirectories must not be project-root files");
   }
 
   const hasKiroAgentJson = manifest.harnessFiles.some(

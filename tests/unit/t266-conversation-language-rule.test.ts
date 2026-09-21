@@ -455,6 +455,10 @@ describe("t266 conversation-language rule layer", () => {
           surface = join(harness.distRoot, "opencode.json");
           required = `${MEMORY_DIR}/**/*.md`;
           break;
+        case "engine-context":
+          surface = join(harness.distRoot, "kiro-crew-app/agents/aidlc.json");
+          required = `file://${MEMORY_DIR}/**/*.md`;
+          break;
         default:
           throw new Error(
             `${harness.name} declares memoryInclude "${include}" with no assertion here — ` +

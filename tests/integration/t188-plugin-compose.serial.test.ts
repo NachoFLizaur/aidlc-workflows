@@ -2111,12 +2111,14 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
   function composeSynthetic(
     name: string,
     files: Record<string, string>,
-    harness: ".claude" | ".kiro" | ".codex" | ".aidlc" | "kiro-ide" = ".claude",
+    harness: ".claude" | ".kiro" | ".codex" | ".aidlc" | "kiro-ide" | ".kiro-crew" = ".claude",
     mutateInstall?: (proj: string, harnessDir: string) => void,
   ): { drops: string; proj: string } {
     const proj = mkdtempSync(join(tmp, `syn-${name}-`));
     const harnessLeaf = harness === "kiro-ide" ? ".kiro" : harness;
-    if (harnessLeaf === ".aidlc") {
+    if (harnessLeaf === ".kiro-crew") {
+      cpSync(join(REPO_ROOT, "dist/kiro-crew"), proj, { recursive: true });
+    } else if (harnessLeaf === ".aidlc") {
       // OpenCode's dist is a whole-project shape (.aidlc + .opencode +
       // opencode.json), unlike the single-dir harness dists.
       cpSync(OPENCODE_DIST, proj, { recursive: true });
@@ -2134,6 +2136,7 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
     const harnessDir = join(proj, harnessLeaf);
     mutateInstall?.(proj, harnessDir);
     const root = prepareSyntheticPlugin(proj, name, files);
+    if (harnessLeaf === ".kiro-crew") cpSync(join(root, ".claude-plugin"), join(root, ".kiro-crew-plugin"), { recursive: true });
     const r = spawnSync(BUN, [join(root, "hooks", "compose.ts")], {
       cwd: proj, encoding: "utf-8", timeout: remainingOperationTimeoutMs(NATIVE_RUNTIME_CASE_TIMEOUT_MS),
       env: {
@@ -2142,6 +2145,7 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
         CLAUDE_PROJECT_DIR: proj,
         AIDLC_HARNESS_DIR: harnessLeaf,
         ...(harness === "kiro-ide" ? { AIDLC_HARNESS_NAME: "kiro-ide" } : {}),
+        ...(harnessLeaf === ".kiro-crew" ? { AIDLC_HARNESS_NAME: "kiro-crew", AIDLC_PLUGIN_ROOT: root } : {}),
       },
     });
     expect(r.status).toBe(0); // compose is fail-open — never breaks the session
@@ -2156,6 +2160,28 @@ describe("t188 plugin compose — emit + compose the contribution seam", () => {
     }
     return { drops, proj };
   }
+
+  test("Crew rejects dispatch and reviewer stages while retaining reviewer-free inline content", () => {
+    const plugin = "syn-crew"; const agent = "syn-crew-agent";
+    const persona = `---\nname: ${agent}\ndisplay_name: Crew fixture\nplugin: ${plugin}\n---\nRead aidlc/spaces/<active-space>/memory/org.md\n`;
+    const stage = (mode: string, reviewer = false) => ["---", `slug: syn-crew-${reviewer ? "reviewed" : mode}`, `plugin: ${plugin}`, "phase: inception", "execution: ALWAYS", "condition: always", `lead_agent: ${agent}`, "support_agents: []", `mode: ${mode}`, ...(reviewer ? [`reviewer: ${agent}`, "review_artifact: crew-output"] : []), "produces:", "  - crew-output", "consumes: []", "requires_stage: []", "inputs: x", "outputs: y", "---", "# Crew fixture", "## Steps", "body", ""].join("\n");
+    const rosters = new Map<string, string>();
+    const result = composeSynthetic(plugin, {
+      ...Object.fromEntries(["inline", "subagent", "pipeline", "mob"].map((mode) => [`stages/inception/syn-crew-${mode}.md`, stage(mode)])),
+      "stages/inception/syn-crew-reviewed.md": stage("inline", true), [`agents/${agent}.md`]: persona,
+    }, ".kiro-crew", (project, engine) => {
+      for (const base of [".kiro", ".opencode", ".github"]) {
+        const path = join(project, base, "agents", `${agent}.md`); mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, persona); rosters.set(path, persona);
+      }
+      writeFileSync(join(engine, "agents", `${agent}.md`), persona);
+    });
+    const stages = join(result.proj, ".kiro-crew/aidlc-common/stages/inception");
+    expect(existsSync(join(stages, "syn-crew-inline.md"))).toBe(true);
+    for (const mode of ["subagent", "pipeline", "mob", "reviewed"]) expect(existsSync(join(stages, `syn-crew-${mode}.md`))).toBe(false);
+    expect(result.drops).toContain("Crew dispatch registration"); expect(result.drops).toContain("reviewer:");
+    expect(existsSync(join(result.proj, ".kiro-crew/agents", `${agent}.md`))).toBe(true);
+    for (const [path, text] of rosters) expect(readFileSync(path, "utf8")).toBe(text);
+  });
 
   test("Kiro rejects plugin-owned ensemble collaborators with a compose drop", () => {
     const stage = [

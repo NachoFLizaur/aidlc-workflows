@@ -378,10 +378,10 @@ describe("offline matrix receipts and reconciliation", () => {
 
   test("effective gate expectations are checked without exporting unrelated environment values", () => {
     const root = repo();
-    const selected = { ...job(), gates: { AIDLC_TUI_LIVE: "1" as const } };
+    const selected = { ...job(), gates: { AIDLC_TUI_LIVE: "1" as const, AIDLC_KIRO_CREW_LIVE: "1" as const } };
     const prepared = plan(root, [selected]);
     const good = seal(root, prepared.path, selected, (input) => {
-      input.gates = { AIDLC_TUI_LIVE: "1", AWS_SECRET_ACCESS_KEY: "do-not-capture", HOME: "/private/profile" };
+      input.gates = { AIDLC_TUI_LIVE: "1", AIDLC_KIRO_CREW_LIVE: "1", AWS_SECRET_ACCESS_KEY: "do-not-capture", HOME: "/private/profile" };
     });
     const body = readFileSync(good.receiptPath, "utf8");
     expect(body).not.toContain("do-not-capture");

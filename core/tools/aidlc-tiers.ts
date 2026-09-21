@@ -87,6 +87,8 @@ export type TierProjection = {
   claude: { model: string; effort: ClaudeEffort | null };
   codex: { model: string | null; effort: CodexEffort | null };
   kiro: { model: string | null };
+  /** Crew owns model selection independently of its execution backend. */
+  "kiro-crew": { model: null };
   /** opencode agent .md frontmatter: `model:` ("provider/model-id") and
    *  optional `variant:` (reasoning effort). Omitted keys inherit the
    *  session's opencode.json defaults — same inherit-by-omission contract
@@ -121,6 +123,7 @@ export const TIER_PROJECTIONS: Record<Tier, TierProjection> = {
     claude: { model: "inherit", effort: null },
     codex: { model: null, effort: null },
     kiro: { model: null },
+    "kiro-crew": { model: null },
     opencode: { model: null, variant: null },
     copilot: { model: null },
     cursor: { model: null },
@@ -135,6 +138,7 @@ export const TIER_PROJECTIONS: Record<Tier, TierProjection> = {
     codex: { model: null, effort: "medium" },
     cursor: { model: null },
     kiro: { model: null },
+    "kiro-crew": { model: null },
     opencode: { model: null, variant: "medium" },
     copilot: { model: null },
   },
@@ -145,6 +149,7 @@ export const TIER_PROJECTIONS: Record<Tier, TierProjection> = {
     claude: { model: "inherit", effort: null },
     codex: { model: null, effort: null },
     kiro: { model: null },
+    "kiro-crew": { model: null },
     opencode: { model: null, variant: null },
     copilot: { model: null },
     cursor: { model: null },

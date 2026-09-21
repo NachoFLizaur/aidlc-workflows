@@ -111,6 +111,7 @@ describe("t329 project-description and document-input boundaries", () => {
       "kiro",
       "kiro-ide",
       "opencode",
+      "kiro-crew",
     ]) {
       const dir = project();
       copyFileSync(

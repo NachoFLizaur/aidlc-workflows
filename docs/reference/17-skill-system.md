@@ -10,6 +10,12 @@ This chapter is the canonical reference for the orchestration architecture that 
 
 ## 1. The engine and the conductor
 
+Crew's conductor reads `.kiro-crew/skills/aidlc/SKILL.md` and explicit runner
+resources; it exposes no native runner catalog command. It uses the engine MCP
+bridge and asynchronous Crew dispatch, with the ledger suppressing Stop nudges
+while children are outstanding. Swarm stops as unsupported, never switching to
+another harness transport. See [Crew daily use](../guide/harnesses/kiro-crew.md#daily-use).
+
 The cutover splits one concern into two. The **engine** owns *between-stage routing* — scope resolution, the flag-precedence ladder, jump-direction computation, resume and init guards, stage sequencing, gate status, and workflow completion. The **conductor** owns *execution quality inside the move the engine named* — framing the persona, asking good questions, keeping the stage diary, the intra-stage Keep/Modify/Redo loop, and surfacing judgement to the human at gates.
 
 The engine is authored at `core/tools/aidlc-orchestrate.ts` and ships into each harness as `<harness-dir>/tools/aidlc-orchestrate.ts` (e.g. `.claude/tools/`); it is a Bun CLI with exactly six subcommands: `next`, `continue`, `report`, `park`, `team-board`, and `wait`. `continue` is internal steering transport; `team-board` is the read-only Team Construction query; `wait` is the bounded read-only wait for dispatched work.

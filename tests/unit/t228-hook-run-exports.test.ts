@@ -51,7 +51,7 @@ const coreHooksDir = authoredCoreHooksDir ?? join(REPO_ROOT, "dist", "claude", "
 let materializedAdapterRoot: string | null = null;
 
 function materializedAdapterPath(
-  harnessName: "kiro" | "kiro-ide" | "codex" | "cursor",
+  harnessName: "kiro" | "kiro-ide" | "codex" | "cursor" | "kiro-crew",
   fileName: string,
 ): string {
   if (materializedAdapterRoot === null) {
@@ -71,6 +71,7 @@ function materializedAdapterPath(
 function adapterSubjects(): Subject[] {
   if (authoredCoreHooksDir) {
     return [
+      { name: "kiro-crew adapter", path: materializedAdapterPath("kiro-crew", "aidlc-kiro-crew-adapter.ts") },
       {
         name: "kiro adapter",
         path: materializedAdapterPath("kiro", "aidlc-kiro-adapter.ts"),
@@ -90,6 +91,7 @@ function adapterSubjects(): Subject[] {
     ];
   }
   return [
+    { name: "kiro-crew adapter", path: join(REPO_ROOT, "dist/kiro-crew/.kiro-crew/hooks/aidlc-kiro-crew-adapter.ts") },
     {
       name: "kiro adapter",
       path: join(REPO_ROOT, "dist", "kiro", ".kiro", "hooks", "aidlc-kiro-adapter.ts"),

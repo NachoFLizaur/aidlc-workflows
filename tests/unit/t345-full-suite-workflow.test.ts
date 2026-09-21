@@ -1134,6 +1134,8 @@ describe("t345 complete nightly coverage", () => {
       });
     }
     expect(FAMILIES.cursor).toMatchObject({ hosting: "excluded", platforms: [], reason: "no credential separation: vendor CLI reads the API key from the agent environment" });
+    expect(FAMILIES["kiro-crew"]).toMatchObject({ hosting: "excluded", platforms: [], requireCoverage: true });
+    expect(VERIFICATION_FAMILIES as readonly string[]).not.toContain("kiro-crew");
   });
 
   test("no workflow step or job exposes vendor API keys", () => {

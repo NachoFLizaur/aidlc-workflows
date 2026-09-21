@@ -1,6 +1,6 @@
 # Running on other harnesses
 
-AI-DLC is one harness-neutral core rendered onto the CLI you use. The
+AI-DLC is one harness-neutral core rendered onto the host you use. The
 methodology — the [phases and stages](../04-phases-and-stages.md), the
 [agents](../06-agents.md), the [scopes](../05-scopes-and-depth.md), the
 [approval gates](../07-interaction-modes.md) — is identical on every harness.
@@ -19,6 +19,7 @@ Onboarding is installed in each harness's native instruction surface:
 | Cursor | `.cursor/rules/aidlc-onboarding.mdc` |
 | opencode | `.aidlc/onboarding.md` |
 | GitHub Copilot | Root `AGENTS.md` (full onboarding, including method imports) |
+| Kiro Crew | Internal `.kiro-crew/AGENTS.md` (explicit read, not root auto-loading) |
 
 Kiro, Kiro IDE, Codex, Cursor, and opencode share a harness-neutral root
 `AGENTS.md` block with other installed harnesses. Their native setup stays in
@@ -59,6 +60,7 @@ Pick your harness:
 | **Cursor** | `/aidlc` | [AI-DLC on Cursor](cursor.md) — one tree for the Cursor IDE and CLI, native subagents and skills, the hooks.json adapter, what's different on Cursor. |
 | **opencode** (≥ 1.17) | `/aidlc` | [AI-DLC on opencode](opencode.md) — the split `.aidlc/` + `.opencode/` layout, the adapter plugin, what's different on opencode. |
 | **GitHub Copilot** (CLI ≥ 1.0.74 / VS Code ≥ 1.130) | `/aidlc` | [AI-DLC on GitHub Copilot](copilot.md) — one install for both surfaces, the `.github/` merge, folder trust, what's different on Copilot. |
+| **Kiro Crew** (≥ 0.6.0) | Plain-text `aidlc` to **aidlc-crew** | [AI-DLC on Kiro Crew](kiro-crew.md) — dashboard host, App Kit registration, project-local engine, and Kiro CLI backend. |
 
 AI-DLC on Kiro (IDE or CLI) works best with **Claude Opus 4.8**, which requires a **paid Kiro plan**.
 
@@ -79,6 +81,20 @@ This set is open: a new harness gets its own chapter here, added from the same
 template. For *building* a new harness (the source contract — manifest, hook
 adapter, `emit.ts`), see the Harness Engineer Guide's
 [Porting to a New Harness](../../harness-engineering/09-porting-to-a-new-harness.md).
+
+## Kiro Crew quick start
+
+Crew needs Bun for its host integration even with a native engine. Follow the
+[five-step guide](kiro-crew.md#install-and-verify) for paths and operator consent:
+
+1. Run App Kit setup `project` to configure the engine and authorize its cwd.
+2. Grant local app trust yourself; `setup trust` only checks and prints instructions.
+3. Run current-source setup `app --apply` to materialize, install, and enable.
+4. Stop the gateway and run setup `hooks --apply --gateway-stopped`.
+5. Check setup status and doctor, then select the project and **aidlc-crew** in a new chat.
+
+Crew is the host, not an alias for the direct Kiro CLI harness. App replacement
+also requires renewed trust after uninstall; see [updates](kiro-crew.md#update-and-removal).
 
 Whichever harness you run, the methodology is the same — start with
 [Your First Workflow](../02-your-first-workflow.md) and the

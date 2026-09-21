@@ -80,10 +80,18 @@ Create `harness/<name>/manifest.ts` exporting a `HarnessManifest`
   each with an explicit init merge policy (`managed-block`, `json-map`,
   `json-array`, or `whole-file`). Declare marker/JSON identity, optionality, and
   exact legacy adoption hashes here. The packager rejects an emitted top-level
-  entry that is neither a managed directory nor a declared root integration.
+  entry that is not a managed directory, declared host-only directory, or
+  declared root integration.
   `shared: "union"` combines managed-block line sets across installed harnesses.
   `shared: "identical"` declares byte-identical content that any declaring harness
   may own, so two harnesses shipping it can coexist; absent `shared`, the block is exclusive.
+- `hostDirectories` (optional) — host-only top-level directory names, such as
+  Crew's `["kiro-crew-app"]`. Emit these directories normally; the packager keeps
+  them in both runtime channels and release archives but excludes them from
+  project-managed directories. Names must be safe, unique, and disjoint from
+  the engine directory and root integrations; symlinks and special files are
+  rejected throughout each host tree. Omit the field when all directories are
+  project-owned. Other emitted top-level directories remain managed by default.
 - `nativeRootIntegrations` (optional) — release-channel-only root files, such as
   a trust seed, with the same merge contract plus an authored `src`.
 - `tierFlavor` — selects the existing Claude/Codex/Kiro/OpenCode agent
@@ -144,10 +152,15 @@ Codex demonstrates native-only root integration and imperative emission.
 The packager writes `tools/data/harness.json`, `aidlc-stamp.json`, and
 `aidlc-projection.json` from these fields. The first is runtime configuration;
 the stamp identifies version/distribution/harness; the projection descriptor is
-the install ownership contract. Its optional project-relative `onboarding` path
-identifies the native file diagnostics tracks (absent when onboarding is the root
-file). `aidlc config` will reject an inconsistent or unsafe descriptor, so do not
-generate parallel metadata in `emit.ts`.
+the runtime classification and install ownership contract. `managedDirectories`
+and `rootIntegrations` name project-owned contents; optional `hostDirectories`
+names runtime-only contents that `aidlc config` never copies into a project.
+Complete runtime admission requires declared host directories to exist, while
+installed-project metadata rereads allow them to be absent. Setup reads the
+host payload from the runtime, not the project. The descriptor's optional
+project-relative `onboarding` path identifies the native file diagnostics tracks
+(absent when onboarding is the root file). `aidlc config` will reject an
+inconsistent or unsafe descriptor, so do not generate parallel metadata in `emit.ts`.
 
 ## Step 2 — the hook adapter (the per-harness shim)
 
@@ -190,6 +203,13 @@ matching `agent_type`).
 
 ## Step 3 — `emit.ts` (the imperative 20%, only if needed)
 
+Crew illustrates a split host/project integration. Its App Kit entry resolves
+the conversation's project before loading the project adapter; `.kiro-crew/`
+holds the engine, while the App Kit supplies agents, explicit resources, setup,
+hooks, and MCP transport. Keep registration and operator trust separate from
+project configuration. Report permission-request enforcement separately from
+advisory notification handling, and leave unsupported events unregistered.
+
 Structural divergence a declarative row can't express is `emit.ts` — a plugin
 the manifest references that the packager calls with an `EmitContext`
 (`repoRoot`, `coreRoot`, `harnessRoot`, `harnessName`, `distRoot`,
@@ -208,6 +228,13 @@ example `.agents/skills/`) therefore participate in the
 same missing, differing, and orphan checks as declarative outputs. Always pass
 emitted command text through `ctx.substituteToken`; otherwise an emitter can
 silently put a Bun command into the native channel.
+
+Crew's `kiro-crew-app/` is an explicit exception: setup, registered hooks, and
+MCP remain Bun programs even in the native distribution. The project engine
+still follows channel-aware invocation projection. App collection validates
+role/resource references and portable command templates before writing;
+installation resolves those templates to absolute paths only after operator
+trust. See [Crew installation](../guide/harnesses/kiro-crew.md#install-and-verify).
 
 ## Step 4 — the bounded transform classes
 

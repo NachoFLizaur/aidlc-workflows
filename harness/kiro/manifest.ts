@@ -3,7 +3,7 @@
 // Projects the harness-neutral core/ tree into dist/kiro/.kiro/, plus Kiro's
 // authored shell surfaces (orchestrator skill, agent JSON configs, the stdin
 // adapter hook, settings/cli.json, AGENTS.md). Mirrors the proven
-// package-kiro.ts spike, generalized onto the unified packager.
+// earlier Kiro packager, generalized onto the unified packager.
 //
 // Kiro specifics vs Claude:
 //   - token → .kiro
@@ -66,6 +66,8 @@ const manifest: HarnessManifest = {
           "sha256:9ad7daa07cbafe9f149311b679281eecd991d2ec77787fc7751226ea0622522b",
           // The pre-neutral shipped variant (#1268 made the root block harness-neutral).
           "sha256:c8777a03505f11dcbb4fb339fef1a8072d9d2500ce401b69a06073b523ea2c67",
+          // Keep v2.9.0 unmarked onboarding recognizable.
+          "sha256:58fe58a25497b3162dce8fa17debf0fe4beb1c2d525b52c9d230eaa93bab1e57",
         ],
       },
     },

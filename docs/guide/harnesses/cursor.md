@@ -16,6 +16,8 @@ directories differ.
 
 ## Layout
 
+For the dashboard-host alternative, see [AI-DLC on Kiro Crew](kiro-crew.md).
+
 Cursor is the most "native" port so far - it consumes the standard core
 projection directly (no `emit.ts`, no split dot-dir). The distribution is:
 

@@ -569,6 +569,7 @@ describe("t318 session binding helpers", () => {
       "kiro",
       "kiro-ide",
       "opencode",
+      "kiro-crew",
     ]) {
       const body = readFileSync(
         join(root, "harness", harness, "dot-gitignore"),

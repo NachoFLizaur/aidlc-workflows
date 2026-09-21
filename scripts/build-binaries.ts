@@ -2452,6 +2452,7 @@ function buildTarget(target: TargetConfig): TargetResult {
     result.gates.push(harnessRuntimeGate(actual.artifact, "cursor", ".cursor"));
     result.gates.push(harnessRuntimeGate(actual.artifact, "kiro", ".kiro"));
     result.gates.push(harnessRuntimeGate(actual.artifact, "kiro-ide", ".kiro"));
+    result.gates.push(harnessRuntimeGate(actual.artifact, "kiro-crew", ".kiro-crew"));
     result.gates.push(harnessRuntimeGate(actual.artifact, "copilot", ".aidlc"));
     result.gates.push(harnessRuntimeGate(actual.artifact, "opencode", ".aidlc"));
     result.gates.push(harnessProbeGate(

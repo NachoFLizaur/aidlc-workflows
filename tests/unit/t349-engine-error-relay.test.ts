@@ -350,7 +350,7 @@ describe("t349 shipped rebuild-stage-graph hook", () => {
   test("writes nothing for harnesses without a channel, success directives, or other commands", () => {
     const proj = tempProject("claude-silent");
     const command = "aidlc engine orchestrate next";
-    for (const harness of ["kiro", "kiro-ide", "copilot", "cursor"]) {
+    for (const harness of ["kiro", "kiro-ide", "copilot", "cursor", "kiro-crew"]) {
       const r = runClaudeHook(proj, claudePostToolUse(command, errorOutput(WINDOWS)), harness);
       expect(r.code, harness).toBe(0);
       expect(r.stdout, harness).toBe("");

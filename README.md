@@ -3,7 +3,7 @@
 AI-DLC (AI-Driven Development Life Cycle) turns AI coding assistants into
 structured, verifiable software-delivery workflows. One harness-neutral core
 runs natively in Claude Code, Kiro CLI, Kiro IDE, Codex CLI, Cursor, opencode,
-and GitHub Copilot.
+GitHub Copilot, and Kiro Crew.
 
 ![version](https://img.shields.io/badge/version-2.10.0-blue)
 ![license](https://img.shields.io/badge/license-MIT--0-green)
@@ -36,6 +36,8 @@ current-process PATH changes, use
 [`-NoModifyPath`](docs/guide/18-install-and-lifecycle.md#windows-powershell).
 Windows uninstall removes only the User PATH entry recorded as installer-owned.
 On macOS, Linux, or WSL, follow the installer's PATH instruction if needed.
+
+Kiro Crew's host-side setup, hooks, and MCP bridge additionally require Bun.
 
 Cannot install a native executable, or prefer to manage the project files
 manually? Install [Bun](https://bun.sh/), download
@@ -90,13 +92,14 @@ guide in the table below. The complete walkthrough is in
 | Cursor | `aidlc config --harness cursor` | Open Cursor or run `agent` | `/aidlc` | [Cursor](docs/guide/harnesses/cursor.md) |
 | opencode >= 1.17 | `aidlc config --harness opencode` | `opencode` | `/aidlc` | [opencode](docs/guide/harnesses/opencode.md) |
 | GitHub Copilot CLI >= 1.0.74 / VS Code >= 1.130 | `aidlc config --harness copilot` | Copilot CLI or VS Code | `/aidlc` | [GitHub Copilot](docs/guide/harnesses/copilot.md) |
+| Kiro Crew >= 0.6.0 | `aidlc config --harness kiro-crew` plus App Kit setup | Dashboard with project selected | Plain-text `aidlc` to **aidlc-crew** | [Kiro Crew](docs/guide/harnesses/kiro-crew.md#install-and-verify) |
 
 Model-provider setup belongs to the harness. Shipped project configuration
 keeps the provider and model already selected by the user. `aidlc config
 providers` can apply Amazon Bedrock settings on supported project surfaces or
 record manual setup for other harnesses. Kiro CLI and Kiro IDE need no provider
 answer because model access comes with Kiro. The methodology itself is
-provider-independent.
+provider-independent. Crew owns backend/model access separately; follow its guide's setup and trust steps before starting work.
 
 ## Recommended Model
 
@@ -141,7 +144,7 @@ for the architecture and methodology.
 ## Repository Layout
 
 - `core/` - hand-authored, harness-neutral methodology and engine
-- `core/tools/` - 82 aidlc-*.ts engine and authoring tools
+- `core/tools/` - 83 aidlc-*.ts engine and authoring tools
 - `harness/<name>/` - thin, harness-specific manifests and integrations
 - `plugins/<name>/` - optional AIDLC plugins
 - `scripts/` - packaging, binary, installer, and release tooling

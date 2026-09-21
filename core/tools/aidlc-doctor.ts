@@ -228,6 +228,7 @@ function humanReport(
     cursor: "Cursor",
     kiro: "Kiro CLI",
     "kiro-ide": "Kiro IDE",
+    "kiro-crew": "Kiro Crew",
     opencode: "opencode",
   };
   const frameworkPattern =
@@ -322,7 +323,9 @@ function humanReport(
     report.failed > 0 ? failVerdict(problems, out) : problems
   }, ${visibleWarnings > 0 ? warnVerdict(warnings, out) : warnings}.\n`;
   if (visibleWarnings > 0) {
-    output += "Warnings are advisory - if everything works, ignore them.\n";
+    output += report.checks.some((check) => check.severity === "warn" && check.label.startsWith("Crew integration — "))
+      ? "Crew integration warnings require preflight attention before workflow work; other warnings are advisory.\n"
+      : "Warnings are advisory - if everything works, ignore them.\n";
   }
   if (report.failed === 0 && visibleWarnings === 0) {
     output += `${success("Your install is ready.", out)}\n`;

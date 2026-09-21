@@ -38,6 +38,7 @@ import {
   type ArchiveEntry,
 } from "../../core/tools/aidlc-archive.ts";
 import { _installedSourcesForTests } from "../../core/tools/aidlc-init.ts";
+import { detectWorkspace } from "../../core/tools/aidlc-utility.ts";
 import { compiledExecutable } from "../../core/tools/aidlc-runtime-paths.ts";
 import { projectionFiles, sha256Bytes, walkFiles } from "../../core/tools/aidlc-distribution.ts";
 import {
@@ -708,6 +709,46 @@ describe("t243 archive and transaction safety", () => {
 });
 
 describe("t243 project initialization", () => {
+  test.each(["dist", "dist-release"])("%s Crew config keeps the App Kit in the runtime and rereads a Greenfield project", (channel) => {
+    const source = temp("aidlc-crew-runtime-");
+    cpSync(join(REPO_ROOT, channel, "kiro-crew"), source, { recursive: true });
+    const { stamp, descriptor } = projectionFiles(source);
+    expect(stamp.distribution).toBe("kiro-crew");
+    expect(descriptor.hostDirectories).toContain("kiro-crew-app");
+    const appFiles = walkFiles(join(source, "kiro-crew-app"));
+    expect(appFiles.length).toBeGreaterThan(0);
+    const project = temp("aidlc-crew-project-");
+    const machine = temp("aidlc-crew-machine-");
+    mkdirSync(join(project, ".git"));
+    const env = {
+      HOME: machine,
+      AIDLC_INSTALL_ROOT: join(machine, "install"),
+      AIDLC_BIN_DIR: join(machine, "bin"),
+      AIDLC_RUNTIME_ROOT: join(machine, "absent-runtime"),
+    };
+    const configured = run(INIT, [
+      "config", "--project-dir", project, "--from", source,
+      "--harness", "kiro-crew", "--mcp", "none",
+    ], project, env);
+    expect(configured.status, configured.stdout + configured.stderr).toBe(0);
+    expect(readdirSync(project).sort()).toEqual([".git", ".gitignore", ".kiro-crew", "aidlc"]);
+    expect(existsSync(join(project, "kiro-crew-app"))).toBe(false);
+    expect(detectWorkspace(project).projectType).toBe("Greenfield");
+    const data = join(project, ".kiro-crew", "tools", "data");
+    expect(JSON.parse(readFileSync(join(data, "aidlc-projection.json"), "utf-8"))).toEqual(descriptor);
+
+    // A record-only config must read installed metadata, not rediscover the
+    // runtime source. Removing the source makes a successful write a witness.
+    rmSync(source, { recursive: true });
+    const reread = run(join(project, ".kiro-crew", "tools", "aidlc.ts"), [
+      "config", "trust", "--project-dir", project, "--acknowledge", "--yes",
+    ], project, env);
+    expect(reread.status, reread.stdout + reread.stderr).toBe(0);
+    expect(JSON.parse(readFileSync(join(data, "harness.json"), "utf-8")).trust.reviewed).toBe(true);
+    expect(existsSync(join(project, "kiro-crew-app"))).toBe(false);
+    expect(detectWorkspace(project).projectType).toBe("Greenfield");
+  }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
+
   test("active-version runtime wins over an executable-adjacent path alias", () => {
     const machine = temp("aidlc-t243-runtime-real-");
     const aliasParent = temp("aidlc-t243-runtime-alias-");
@@ -5703,6 +5744,7 @@ describe("t243 projection channel", () => {
           "sha256:dd650e54fb2e645b6f30002f91f8f6f174fe34550295582f5b6a95356edaed77",
           "sha256:87563548299dd2a0c1fcd3cde480b612bd1ec767a2550dbc05a6a041a3d7f522",
           "sha256:c7843449d549d4226be39169a9c31bf89694cd0b0754cb1ee68bdf61759538ce",
+          "sha256:28676756d93dec7edb39b8742ac256fbb1c946103977746b00b09788b0b415f6",
           "sha256:6de1298dfa4c2b6916f66d372b844faf23481c8f258eedd595c1423dab8e106d",
         ],
       },
@@ -5722,6 +5764,7 @@ describe("t243 projection channel", () => {
           "sha256:ecb68f08789258e77c81488e98dd1632b607b567a2424311c4dcdc30ce3e768f",
           "sha256:9ad7daa07cbafe9f149311b679281eecd991d2ec77787fc7751226ea0622522b",
           "sha256:c8777a03505f11dcbb4fb339fef1a8072d9d2500ce401b69a06073b523ea2c67",
+          "sha256:58fe58a25497b3162dce8fa17debf0fe4beb1c2d525b52c9d230eaa93bab1e57",
           "sha256:6de1298dfa4c2b6916f66d372b844faf23481c8f258eedd595c1423dab8e106d",
         ],
       },
@@ -5741,6 +5784,7 @@ describe("t243 projection channel", () => {
           "sha256:6735312a6ece44f0ba65b949ede2a241669fa422db584dadb2a9ed57e4e43be7",
           "sha256:94f27a88ddba31149876da0609e0eb9a36ce153f52f27898579c846daec2ff59",
           "sha256:5f6f076a5a9d8a11e1078f568c9dee091f399d9999fae89e9dffa62d8697b797",
+          "sha256:d20a161ab572313458c9aeb9e88b928b7b33e373170c0f58b3c10b1828fbcc81",
           "sha256:6de1298dfa4c2b6916f66d372b844faf23481c8f258eedd595c1423dab8e106d",
         ],
       },
@@ -5750,6 +5794,7 @@ describe("t243 projection channel", () => {
           "sha256:2907b5293bfd8bd9d5f8b7a8025bfe23edd0ffcd31f925761916088517880936",
           "sha256:2ef8a8cd1b72e59d017013b8d261721b1c5dedb82499b44dc9a97be01b6a73cb",
           "sha256:eeabf9f9555124da3f5ad34eb3a26b9fcbf3e2ccd65610cb9f0182701cf3ef48",
+          "sha256:1148b0ecc5bed873541d6424e5ba6bd0c071c7267d53669d651ce2411d04e637",
           "sha256:6de1298dfa4c2b6916f66d372b844faf23481c8f258eedd595c1423dab8e106d",
         ],
         "install.ts": [
@@ -5762,6 +5807,7 @@ describe("t243 projection channel", () => {
           "sha256:d86a61b7376772dcc7afdaefd63ce185f99d9c32d0e455668cf3b52f91a13d40",
           "sha256:db6e65ed85d6b47ca47d72b5a323ddc4dca76d021cce92591c1a28b26d9f237a",
           "sha256:c5b990429fe6dfa084d58fc592d1d22c1170cc35aa98f9cbb2c82b9924520eda",
+          "sha256:bfe73c1d84939b4aef237bd37d5a9789be43eb9059b77e0a60722b527f56456c",
           "sha256:6de1298dfa4c2b6916f66d372b844faf23481c8f258eedd595c1423dab8e106d",
         ],
         "opencode.json": [
@@ -5776,6 +5822,7 @@ describe("t243 projection channel", () => {
           "sha256:bf3077a6520e2735f618bad386858afc57edceaa791d98de7a6c269d71861e56",
           "sha256:55b31ba55f6e7ebc47fe76a00039e2ec16e020503fb63791cbd8665438ff32ac",
           "sha256:7a3a19981ba7a3c447b54eb0d0b1e96f8c9931687595967103cb5dfbb3c2b309",
+          "sha256:c39d454868e4c7ca77497c86c18119de58ee343b33c04c52d09072f4b5c578ea",
           "sha256:622ebad60ee4fed6a2a9811e7378ccbff6b76d651aaee00fd079b02471d8cf06",
           "sha256:a25a15052889fe6b5900f0fef5262cc50cb00bb436e52f1eb1abe62db35b2f50",
         ],
@@ -6023,6 +6070,80 @@ describe("t243 projection channel", () => {
     writeFileSync(path, `${JSON.stringify(descriptor, null, 2)}\n`);
     const { projectionFiles } = await import("../../core/tools/aidlc-distribution.ts");
     expect(() => projectionFiles(root)).toThrow("safe top-level name");
+  });
+
+  test.each(["dist", "dist-release"])("%s opencode admission rejects duplicate managed directories and overlapping root integrations", (channel) => {
+    const source = temp("aidlc-projection-overlap-");
+    cpSync(join(REPO_ROOT, channel, "opencode"), source, { recursive: true });
+    const { descriptor } = projectionFiles(source);
+    const path = join(source, ".aidlc", "tools", "data", "aidlc-projection.json");
+    writeFileSync(path, JSON.stringify({
+      ...descriptor, managedDirectories: [...descriptor.managedDirectories, ".aidlc"],
+    }));
+    expect(() => projectionFiles(source)).toThrow("duplicate projected path .aidlc");
+    writeFileSync(path, JSON.stringify({
+      ...descriptor,
+      rootIntegrations: [...descriptor.rootIntegrations, { path: ".aidlc/onboarding.md", policy: "whole-file" }],
+    }));
+    expect(() => projectionFiles(source)).toThrow("overlapping projected paths .aidlc and .aidlc/onboarding.md");
+  });
+
+  test.each(["dist", "dist-release"])("%s Crew admission rejects undeclared, missing and unsafe host directories", (channel) => {
+    const source = temp("aidlc-crew-admission-");
+    cpSync(join(REPO_ROOT, channel, "kiro-crew"), source, { recursive: true });
+    const { descriptor } = projectionFiles(source);
+    const path = join(source, ".kiro-crew", "tools", "data", "aidlc-projection.json");
+    mkdirSync(join(source, "undeclared"));
+    expect(() => projectionFiles(source)).toThrow("unclassified projection entries: undeclared");
+    rmSync(join(source, "undeclared"), { recursive: true });
+
+    for (const directory of ["..", source]) {
+      writeFileSync(path, JSON.stringify({ ...descriptor, hostDirectories: [directory] }));
+      expect(() => projectionFiles(source)).toThrow("host directory is not a safe top-level name");
+    }
+    writeFileSync(path, JSON.stringify(descriptor));
+    rmSync(join(source, "kiro-crew-app"), { recursive: true });
+    expect(() => projectionFiles(source)).toThrow("host directory is missing or invalid: kiro-crew-app");
+  });
+
+  test.each(["dist", "dist-release"])("%s Crew admission rejects host directories overlapping project-managed directories", (channel) => {
+    const source = temp("aidlc-crew-overlap-");
+    cpSync(join(REPO_ROOT, channel, "kiro-crew"), source, { recursive: true });
+    const { descriptor } = projectionFiles(source);
+    const path = join(source, ".kiro-crew", "tools", "data", "aidlc-projection.json");
+    // Retain the real host declaration so an unrelated unclassified entry
+    // cannot make a missing overlap check look like a successful refusal.
+    expect(descriptor.managedDirectories).toContain("aidlc");
+    writeFileSync(path, JSON.stringify({
+      ...descriptor, hostDirectories: [...(descriptor.hostDirectories ?? []), "aidlc"],
+    }));
+    expect(() => projectionFiles(source)).toThrow("duplicate projected path aidlc");
+  });
+
+  test.skipIf(process.platform === "win32")("Crew admission rejects linked host directories and nested links or special files in both channels", () => {
+    for (const channel of ["dist", "dist-release"]) {
+      const source = temp("aidlc-crew-host-content-");
+      cpSync(join(REPO_ROOT, channel, "kiro-crew"), source, { recursive: true });
+      expect(projectionFiles(source).descriptor.hostDirectories).toContain("kiro-crew-app");
+      const outside = temp("aidlc-crew-outside-");
+      const app = join(source, "kiro-crew-app");
+      const nested = join(app, "nested");
+      mkdirSync(nested);
+      symlinkSync(outside, join(nested, "linked"), "dir");
+      expect(() => projectionFiles(source)).toThrow("links and special files are not valid projection content");
+      rmSync(join(nested, "linked"));
+      const fifo = join(nested, "fifo");
+      const made = spawnSync("mkfifo", [fifo], {
+        encoding: "utf-8", timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS),
+      });
+      expect(made.status, made.stderr).toBe(0);
+      expect(() => projectionFiles(source)).toThrow("links and special files are not valid projection content");
+      rmSync(fifo);
+      rmSync(app, { recursive: true });
+      symlinkSync(outside, app, "dir");
+      expect(() => projectionFiles(source)).toThrow("projected path traverses a symlink: kiro-crew-app");
+      expect(readdirSync(outside)).toEqual([]);
+    }
   });
 
   test("config refuses a projection descriptor with an invalid onboarding path", () => {

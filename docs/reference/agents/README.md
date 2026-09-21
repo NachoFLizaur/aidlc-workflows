@@ -33,6 +33,12 @@ For design philosophy and rationale, see the
 
 All 14 authored agents share a common frontmatter baseline. On Claude Code, none declares a `tools:` allowlist, so every agent inherits the **full session toolset** plus provisioned MCP tools, with `disallowedTools: Task` as the nested-delegation denial. Other harnesses project that intent into native policy: Kiro agent Markdown omits the unsupported key, while Kiro CLI JSON and Kiro IDE `tools:` grants exclude `subagent` from delegates. The two review-only agents additionally carry `maxTurns: 60` - a hard turn backstop enforced natively where the harness has a lever: on Claude Code the frontmatter key is binding (the sub-agent is stopped mid-task, no final message), and on opencode the packager projects it to the native per-agent `steps: 60` (the runner grants one final text-only turn - a summary can return, but no tool call can write the review). Codex TOML personas carry the number as prose only (a TOML persona has no frontmatter, so the emit rewrites the citation), and Cursor, Copilot, and Kiro expose no per-agent cap key (the inert `maxTurns:` key still ships on the .md surfaces that tolerate unknown keys; the kiro agent JSONs never receive it). Section 12a's incomplete-attempt guard turns a review cut off at the cap into one retried dispatch and then a NOT-READY finding instead of a silently missing verdict - and the conductor deletes any pre-existing `## Review` section before every dispatch, so a stale verdict can never stand in for a missing one.
 
+Crew uses explicit `.kiro-crew/agents/` resources and App Kit inline prompts,
+not Claude tool inheritance. The role map supplies dispatch names, only the
+conductor mounts Crew dispatch, and Crew owns backend/model selection. Child
+hook delivery is not guaranteed; [engine receipts](../06-hooks-and-tools.md#kiro-crew-hook-contract)
+remain necessary after host completion.
+
 ### The Claude Code session toolset
 
 Every Claude Code agent inherits the built-in tools, including:

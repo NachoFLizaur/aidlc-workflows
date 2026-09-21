@@ -24,7 +24,7 @@
 //   6. REFRESH generated stage/scope table regions in the assembled orchestrator
 //      skill from the just-compiled graph and scope grid.
 //
-// THE TRANSFORM CLASS (T5 — the only permitted text transform): the harness-dir
+// THE TRANSFORM CLASS (permitted text transform): the harness-dir
 // token. core/ prose carries {{HARNESS_DIR}}; here it becomes `.claude`/`.kiro`/
 // `.codex`. Truthful carve-outs in core (workspace-detection's 3-dir list, the
 // `$CLAUDE_PROJECT_DIR on Claude Code` note) never carried the token, so they
@@ -96,7 +96,7 @@ import {
 import { ROUTES, TOOLS } from "../core/tools/aidlc.ts";
 import { AIDLC_VERSION } from "../core/tools/aidlc-version.ts";
 import { BUILD_VERSION_ENV, releaseBuildVersion } from "../core/tools/aidlc-channel.ts";
-import { sha256Bytes } from "../core/tools/aidlc-distribution.ts";
+import { projectionFiles, sha256Bytes } from "../core/tools/aidlc-distribution.ts";
 import { AIDLC_SETTINGS_SCHEMA } from "../core/tools/aidlc-settings.ts";
 
 const REPO_ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -217,8 +217,8 @@ function substituteToken(
 // Rewrite in-prose `<harnessDir>/rules/` → `<harnessDir>/<rulesRename>/` for a
 // harness that renames its rules dir (kiro: steering, codex: aidlc-rules).
 // Anchored on the post-substitution harness-dir form so it can't touch an
-// unrelated `rules/` mention — the proven STEERING_RENAME step from the spike
-// packagers. No-op when rulesRename is null (claude).
+// unrelated `rules/` mention — a scoped steering-path rename.
+// No-op when rulesRename is null (claude).
 function applyRulesRename(s: string, harnessDir: string, rulesRename: string | null): string {
   if (!rulesRename) return s;
   // Codex's native Starlark permission file is not an AIDLC markdown rule.
@@ -370,13 +370,13 @@ function transform(
     s = substituteToken(s, harnessDir, invoke);
     s = applyRulesRename(s, harnessDir, rulesRename);
     if (harness) s = projectTierFrontmatter(s, srcPath, harness);
-    // Cursor, opencode, and Copilot persona bodies are mutable active-space
+    // Cursor, opencode, Copilot, and Crew engine personas are mutable active-space
     // pointers. Ship their memory references on the default seed so the first
     // startup's repointHarnessIncludes(project, "default") is byte-identical;
     // later space switches still rewrite the same concrete segment in place.
     const posixPath = srcPath.split(sep).join("/");
     if (
-      (harness === "cursor" || harness === "opencode" || harness === "copilot") &&
+      (harness === "cursor" || harness === "opencode" || harness === "copilot" || harness === "kiro-crew") &&
       posixPath.includes("/agents/") &&
       posixPath.endsWith("-agent.md")
     ) {
@@ -487,7 +487,7 @@ function diffTrees(
 // below scans both after compile.
 const COMPILED_DATA = ["tools/data/stage-graph.json", "tools/data/scope-grid.json"];
 
-// The packager-emitted harness descriptor (vision T1 open-set seam): the
+// The packager-emitted harness descriptor (open-set harness descriptor seam): the
 // runtime reads tools/data/harness.json to learn this harness's rules-subdir
 // without a hardcoded map. Derived from the manifest, written into every tree.
 const HARNESS_DATA = "tools/data/harness.json";
@@ -601,6 +601,12 @@ function writeSettingsSchemaData(treeRoot: string): void {
   writeFileSync(dst, `${JSON.stringify(AIDLC_SETTINGS_SCHEMA, null, 2)}\n`);
 }
 
+/**
+ * Classify emitted directories using the manifest before publishing ownership
+ * metadata. Only declared host directories are excluded from project ownership;
+ * shared runtime admission then rejects unsafe, overlapping or missing entries
+ * and host-tree links. Invalid output aborts packaging with no opt-out.
+ */
 function writeProjectionData(outRoot: string, treeRoot: string, m: HarnessManifest): void {
   const rootIntegrationPaths = new Set(m.rootIntegrations.map((item) => item.path));
   if (rootIntegrationPaths.size !== m.rootIntegrations.length) {
@@ -611,12 +617,14 @@ function writeProjectionData(outRoot: string, treeRoot: string, m: HarnessManife
       throw new Error(`[${m.name}] root integration is not projected: ${integration.path}`);
     }
   }
+  const hostDirectories = m.hostDirectories ?? [];
   const managedDirectories = readdirSync(outRoot)
     .filter((entry) => statSync(join(outRoot, entry)).isDirectory())
-    .filter((entry) => !rootIntegrationPaths.has(entry))
+    .filter((entry) => !rootIntegrationPaths.has(entry) && !hostDirectories.includes(entry))
     .sort();
   const allowedTopLevel = new Set([
     ...managedDirectories,
+    ...hostDirectories,
     ...m.rootIntegrations.map((item) => item.path.split("/")[0]),
   ]);
   const unclassified = readdirSync(outRoot)
@@ -667,6 +675,7 @@ function writeProjectionData(outRoot: string, treeRoot: string, m: HarnessManife
         ? { onboarding: `${m.harnessDir}/${m.onboarding.dst}` }
         : {}),
     managedDirectories,
+    ...(hostDirectories.length ? { hostDirectories } : {}),
     rootIntegrations,
   };
   const stamp = {
@@ -678,6 +687,7 @@ function writeProjectionData(outRoot: string, treeRoot: string, m: HarnessManife
   mkdirSync(join(treeRoot, "tools", "data"), { recursive: true });
   writeFileSync(join(treeRoot, PROJECTION_DATA), `${JSON.stringify(projection, null, 2)}\n`);
   writeFileSync(join(treeRoot, STAMP_DATA), `${JSON.stringify(stamp, null, 2)}\n`);
+  projectionFiles(outRoot);
 }
 
 // Emit the method ("memory") tree at the WORKSPACE ROOT of the dist tree
@@ -1118,10 +1128,36 @@ function projectedNamespaceInvocationViolations(
   file: string,
   value: string,
 ): string[] {
-  return scanNamespaceInvocations(file, value, ROUTES)
+  /** Validate decoded JSON strings before accepting the native projection.
+   * Serialization escapes are not command characters; embedded line breaks are
+   * whitespace in prompt invocations. Scan every string, including object keys,
+   * against the same routes. Invalid JSON or unresolved commands abort packaging;
+   * no file or route exemption applies. Other source formats retain their scan. */
+  const sources: Array<{ file: string; value: string }> = [];
+  if (file.endsWith(".json")) {
+    const visit = (node: unknown, path: string): void => {
+      if (typeof node === "string") {
+        sources.push({ file: `${file}${path}`, value: node.replace(/\r\n?|\n/g, " ") });
+      } else if (Array.isArray(node)) {
+        node.forEach((item, index) => {
+          visit(item, `${path}[${index}]`);
+        });
+      } else if (node !== null && typeof node === "object") {
+        for (const [key, item] of Object.entries(node)) {
+          const child = `${path}[${JSON.stringify(key)}]`;
+          visit(key, `${child} (key)`);
+          visit(item, child);
+        }
+      }
+    };
+    visit(JSON.parse(value), "");
+  } else {
+    sources.push({ file, value });
+  }
+  return sources.flatMap((source) => scanNamespaceInvocations(source.file, source.value, ROUTES))
     .filter((invocation) => invocation.source === "aidlc" && !invocation.resolves)
     .map((invocation) =>
-      `${file}:${invocation.line}: unresolvable projected namespace invocation "${invocation.command}"`
+      `${invocation.file}:${invocation.line}: unresolvable projected namespace invocation "${invocation.command}"`
     );
 }
 
@@ -1142,6 +1178,7 @@ function rewriteNativeInvocations(
   // The authored subprocess adapters, each backed by an `aidlc engine adapter
   // <harness>` dispatcher route. Only these project onto that route; any other
   // hook file keeps the generic one-argument `engine hook <name>` rewrite.
+  // Crew invokes `engine adapter kiro-crew`, never a direct adapter filename.
   const adapterHookNames: Record<string, true> = {
     "kiro-adapter": true,
     "codex-adapter": true,
@@ -1296,6 +1333,9 @@ function rewriteNativeInvocations(
   writeFileSync(descriptorPath, `${JSON.stringify(descriptor, null, 2)}\n`);
 
   const leftovers: string[] = [];
+  // Recheck the complete native contract after adding native root integrations
+  // and deriving project-owned legacy hashes; host payloads stay in the runtime.
+  projectionFiles(outRoot);
   for (const file of walk(outRoot)) {
     if (!/\.(?:md|mdc|json|toml|hook|ts)$/.test(file)) continue;
     const value = readFileSync(file, "utf-8");

@@ -198,6 +198,7 @@ describe("t263 reviewer terminal-receipt ordering (receipt-invalidation loop fix
       "opencode",
       "cursor",
       "copilot",
+      "kiro-crew",
     ]) {
       const src = readFileSync(
         join(REPO_ROOT, "harness", harness, "skills", "aidlc", "SKILL.md"),

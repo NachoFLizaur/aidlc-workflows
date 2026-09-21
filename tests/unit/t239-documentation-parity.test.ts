@@ -152,6 +152,7 @@ const harnessLabels: Record<string, string> = {
   copilot: "GitHub Copilot",
   cursor: "Cursor",
   kiro: "Kiro CLI",
+  "kiro-crew": "Kiro Crew",
   "kiro-ide": "Kiro IDE",
   opencode: "opencode",
 };
@@ -296,6 +297,7 @@ describe("documentation parity derives current behavior from authored implementa
       "copilot",
       "cursor",
       "kiro",
+      "kiro-crew",
       "kiro-ide",
       "opencode",
     ]);
@@ -317,6 +319,25 @@ describe("documentation parity derives current behavior from authored implementa
       .map((match) => match[1])
       .sort();
     expect(indexLabels).toEqual(Object.values(harnessLabels).sort());
+
+    const guidePaths: Record<string, string> = {
+      claude: "guide/01-getting-started.md",
+      codex: "guide/harnesses/codex-cli.md",
+      copilot: "guide/harnesses/copilot.md",
+      cursor: "guide/harnesses/cursor.md",
+      kiro: "guide/harnesses/kiro-cli.md",
+      "kiro-crew": "guide/harnesses/kiro-crew.md",
+      "kiro-ide": "guide/harnesses/kiro-ide.md",
+      opencode: "guide/harnesses/opencode.md",
+    };
+    expect(Object.keys(guidePaths).sort()).toEqual(harnessNames);
+    for (const name of harnessNames) {
+      const path = guidePaths[name];
+      expect(existsSync(at("docs", path)), name).toBe(true);
+      expect(readmeRoster).toContain(`docs/${path}`);
+      expect(harnessIndex).toContain(basename(path));
+      expect(read("zensical.toml")).toContain(`"${path}"`);
+    }
 
     const glossaryDistribution = read("docs", "guide", "glossary.md")
       .split("\n")

@@ -43,6 +43,7 @@ const ALL_AGENTS = [
 ] as const;
 
 const DELEGATED_SURFACES = [
+  { name: "kiro-crew", root: join(REPO_ROOT, "dist/kiro-crew/.kiro-crew/agents"), ext: ".md", harnessDir: ".kiro-crew" },
   {
     name: "claude",
     root: join(REPO_ROOT, "dist", "claude", ".claude", "agents"),

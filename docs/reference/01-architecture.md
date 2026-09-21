@@ -252,8 +252,8 @@ sequenceDiagram
 ## Source vs distribution (one core, many harnesses)
 
 The framework is **authored once and generated per harness** — today Claude
-Code, Kiro CLI, Kiro IDE, Codex CLI, Cursor, opencode, and GitHub Copilot, and
-any capable CLI you port it to. The
+Code, Kiro CLI, Kiro IDE, Codex CLI, Cursor, opencode, GitHub Copilot, and Kiro Crew, and
+any capable host you port it to. The
 hand-authored source is a harness-neutral `core/` plus a thin `harness/<name>/`
 surface per CLI; `bun scripts/package.ts` materializes ignored local
 `dist/<harness>/` trees:
@@ -293,6 +293,14 @@ trust seeds, are added only to the release projection. Neither root is
 committed. `package.ts --check` builds the complete projection set twice in
 independent temporary roots and byte-compares those results. CI, tests, binary
 builds, and release packaging regenerate before consuming either local root.
+
+Crew additionally emits `kiro-crew-app/`, the host shell, beside the project
+engine `.kiro-crew/` and shared `aidlc/` workspace. The App Kit contains no
+second engine: registered MCP calls select a stamped project and invoke its
+TypeScript dispatcher. Host setup, hooks, and MCP require Bun in both channels.
+Internal `.kiro-crew/AGENTS.md` and project resources are read explicitly;
+there is no Crew-owned project-root instruction block. See
+[Crew layout](../guide/harnesses/kiro-crew.md#layout-app-kit-and-project).
 
 ### Markdown structure
 
@@ -360,10 +368,16 @@ under `tools/data/`:
 - `aidlc-stamp.json` is immutable projection identity: schema, framework
   version, distribution, and harness directory.
 - `aidlc-projection.json` is the exhaustive install descriptor. It classifies
-  every top-level output as a framework-managed directory or a root integration
-  with one typed merge policy (`managed-block`, `json-map`, `json-array`, or
-  `whole-file`). Optional integrations and exact legacy hashes are declared
-  here; an unclassified top-level entry makes packaging or loading fail.
+  every top-level output as a project-owned `managedDirectories` entry, a
+  runtime-only `hostDirectories` entry, or a `rootIntegrations` entry with one
+  typed merge policy (`managed-block`, `json-map`, `json-array`, or `whole-file`).
+  Host directories are manifest-declared and optional as a category (absent means
+  none): Crew declares `kiro-crew-app`. They ship in both runtime channels and
+  release archives for host setup, but `config` never copies them into projects
+  or requires their presence when rereading installed-project metadata. Complete
+  runtimes must contain them; unsafe, overlapping, or symlinked host contents
+  are rejected. Optional integrations and exact legacy hashes are declared
+  here; an unclassified top-level entry makes packaging or runtime loading fail.
 
 `aidlc config` validates the stamp and descriptor before planning. It writes a
 fourth file, `aidlc-manifest.json`, into the installed harness as the

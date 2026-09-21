@@ -20,6 +20,9 @@ must still differ (Kiro CLI and Kiro IDE cannot share one `.kiro/` install).
 
 ## Prerequisites
 
+For the dashboard host with a separate App Kit and project engine, use the
+[Kiro Crew guide](kiro-crew.md). This chapter covers direct Kiro CLI sessions.
+
 - **Kiro CLI ≥ 2.6** (`kiro-cli --version`), logged in (`kiro-cli login`)
 - **bun** only when generating or running the source/development `dist/`
   projection. Native installs and versioned release runtimes are

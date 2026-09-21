@@ -46,6 +46,7 @@ const HARNESSES = [
   { name: "kiro", dir: ".kiro" },
   { name: "kiro-ide", dir: ".kiro" },
   { name: "opencode", dir: ".aidlc" },
+  { name: "kiro-crew", dir: ".kiro-crew" },
 ] as const;
 
 type Harness = (typeof HARNESSES)[number];

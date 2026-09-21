@@ -129,6 +129,7 @@ import {
   HARNESS_HONESTY,
   harnessHonestyNotes,
   isModelEffort,
+  isModelHarness,
   isModelPreset,
   MODEL_EFFORTS,
   MODEL_GROUPS,
@@ -597,17 +598,7 @@ function configPositionals(argv: readonly string[]): Array<{ value: string; inde
 }
 
 function modelHarness(value: string): ModelHarness {
-  if (
-    value === "claude" ||
-    value === "codex" ||
-    value === "copilot" ||
-    value === "cursor" ||
-    value === "kiro" ||
-    value === "kiro-ide" ||
-    value === "opencode"
-  ) {
-    return value;
-  }
+  if (isModelHarness(value)) return value;
   throw new Error(`models policy is not supported for harness ${JSON.stringify(value)}`);
 }
 
@@ -1558,7 +1549,9 @@ function showDiagnosticSection(
     const record = data.record as ProvidersRecord | null;
     if (data.harnessManaged) {
       const product = projectionProductName(selected.root, selected.distribution);
-      output += `  Model access: comes with ${product}; AI-DLC configures no model provider\n`;
+      output += selected.harness === "kiro-crew"
+        ? `  ${ownedModelAccessFact(product, selected.harness)}\n`
+        : `  Model access: comes with ${product}; AI-DLC configures no model provider\n`;
       if (record !== null) {
         output += `  Legacy provider answer present and ignored; ${configCommand("providers --reset")} clears it.\n`;
       }
@@ -2201,7 +2194,9 @@ function setupMapRows(
     :
     (records.trust?.reviewed ? "review acknowledged" : "no unmet host trust");
   const providerDetail = !providerManaged
-    ? `model access comes with ${projectionProductName(root, distribution)}; nothing for AI-DLC to configure`
+    ? distribution === "kiro-crew"
+      ? "model access managed by Kiro Crew; no project provider configuration"
+      : `model access comes with ${projectionProductName(root, distribution)}; nothing for AI-DLC to configure`
     : records.providers === null
     ? "no recorded answers; provider access unverified"
     : providers.length > 0
@@ -2529,7 +2524,7 @@ function prepareDiagnosticSection(
     // object and `--quiet` a single line, so only the human mode prints it.
     if (options.mode === "human") {
       const product = projectionProductName(selected.root, selected.distribution);
-      process.stdout.write(`  ${ownedModelAccessFact(product)} Nothing to answer.\n`);
+      process.stdout.write(`  ${ownedModelAccessFact(product, selected.harness)} Nothing to answer.\n`);
     }
     emitResult(
       success(`providers needs no answer for ${selected.harness}; its model access is harness-managed`),
@@ -5248,6 +5243,7 @@ function copiedProjectSource(
   }
   validateProjectionDescriptor(projectDir, stamp, descriptor, {
     allowMissingRootIntegrations: true,
+    allowMissingHostDirectories: true,
   });
   const cleanup = mkdtempSync(join(tmpdir(), "aidlc-config-copy-source-"));
   const root = join(cleanup, "projection");
@@ -6121,7 +6117,7 @@ function customizeFirstRun(
       if (harnessOwnsModelAccess(harness)) {
         writeMenuRow(
           "  ",
-          `${ownedModelAccessFact(product)} There is nothing to choose here.`,
+          `${ownedModelAccessFact(product, harness)} There is nothing to choose here.`,
         );
         process.stdout.write("\n");
         choices.provider = "harness-managed";
@@ -6257,7 +6253,9 @@ function customizeFirstRun(
       choices.provider === "amazon-bedrock"
         ? `amazon-bedrock, ${choices.region}, ${choices.profile || "default credential chain"}`
         : choices.provider === "harness-managed"
-        ? `comes with ${choices.candidate.descriptor.productName}`
+        ? choices.candidate.stamp.distribution === "kiro-crew"
+          ? "managed by Kiro Crew; access depends on your provider configuration"
+          : `comes with ${choices.candidate.descriptor.productName}`
         : "keep current"
     }`);
     process.stdout.write(`    3. Preset       ${choices.preset === "unchanged" ? "none (unchanged)" : choices.preset}\n`);
@@ -6380,7 +6378,9 @@ async function runFirstRunWizard(projectDir: string): Promise<boolean> {
       candidate.stamp.distribution === "claude" ? "MCP servers on, " : ""
     }all plugins, ${
       harnessOwnsModelAccess(modelHarness(candidate.stamp.distribution))
-        ? `no provider settings; model access comes with ${candidate.descriptor.productName}`
+        ? candidate.stamp.distribution === "kiro-crew"
+          ? "no project provider settings; model access managed by Kiro Crew"
+          : `no provider settings; model access comes with ${candidate.descriptor.productName}`
         : "current model provider preserved"
     }`,
   );

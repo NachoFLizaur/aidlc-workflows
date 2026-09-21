@@ -539,3 +539,23 @@ operation remains available and the restoration offer still applies.
 After restoration succeeds, announce the returned restored path plainly:
 **SAY:** "I restored the previous attempt at [returned restored path]."
 Restoration does not resume the old attempt or make its review current.
+
+---
+
+### Kiro Crew
+
+Swarm fan-out is **unsupported** on Kiro Crew. **You — the live conductor — own dispatch; `aidlc-swarm.ts` remains the deterministic referee, not a dispatch loop.** On `invoke-swarm`, STOP before preparing worktrees, dispatch or artifact work. Do not call `spawn_run`/`spawn_continue`, substitute Kiro-native delegation, another harness binding or a shell-launched backend. Do not replace referee convergence evidence with host completion, claim Units, finalize, merge or report the batch completed/approved. Preserve existing worktrees and receipts for explicit recovery; never discard/re-prepare automatically.
+
+Offer the non-swarm ensemble path in the ensemble module's **Kiro Crew** subsection with `delegation.md` transport. Wait for the human's choice; never silently convert the directive or change its autonomy grant. Missing alternative binding/tools leaves the stop in place.
+
+Support requires all of these conditions, which this integration does not establish:
+
+- **Per-worktree transport:** one `spawn_run.cwd` covers all tasks. Distinct worktrees require distinct single-cwd calls with their own intend/confirm, but the current transport requires END TURN after one spawn and immediate bookkeeping. Never improvise multiple calls or move children between worktrees.
+- **Worktree engine/state:** each worker needs its own projection stamp, engine and intended space/intent state. Committed files survive a fork; ignored active-space, active-intent and session records do not. Referee preparation/Bolt state is not Crew session bootstrap; never copy conductor identity or assume sibling repositories contain an engine.
+- **Child identity/binding:** role agents expose the engine, not dispatch. A resolvable child key and stamped worktree launch may bind that child there; this is not proof of worktree startup. Never substitute conductor key, gateway cwd or App Kit cwd. Absent hook binding is nonparticipation; child delivery is advisory with no guarantee, while engine authority remains required.
+
+**Worktree authorization.** A realpath-descendant worktree under the authorized project can satisfy Crew's cwd-root check; escaping symlinks cannot. Authorization does not satisfy transport, state or identity prerequisites.
+
+**Stop boundary.** Read the active Crew harness, `invoke-swarm` and this support boundary before prepare/dispatch/workflow mutation. Fail toward a visible stop; this is a conductor contract, not a runtime guard. No `AIDLC_USE_SWARM`, setting or autonomy grant disables it. Genuine `run-stage` with `directive.swarm_settled === true` follows metadata-aware settled-swarm completion, not new fan-out.
+
+**Autonomous reviewer boundary.** The stop precedes reviewer dispatch too: never manufacture review, READY or convergence receipts to escape it. Existing engine receipts remain authoritative. Genuine settled re-entry dispatches neither builders nor reviewers again; follow only its named completion, learnings and approval rituals.

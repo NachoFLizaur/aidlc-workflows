@@ -10,6 +10,11 @@ This chapter walks through a complete AI-DLC workflow run, explaining what you s
 > Your harness's chapter under
 > [Running on other harnesses](harnesses/README.md) lists every difference.
 
+On [Kiro Crew](harnesses/kiro-crew.md), send these requests as plain text to
+**aidlc-crew** with the project selected. The conductor binds through
+`aidlc_status` and runs doctor before work. Crew's hook coverage is narrower
+than Claude's; host child completion alone never completes a workflow stage.
+
 ---
 
 ## Starting the Workflow

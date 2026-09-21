@@ -196,6 +196,7 @@ describe("t266 review class", () => {
       "dist/kiro-ide/.kiro/tools/data/stage-graph.json",
       "dist/codex/.codex/tools/data/stage-graph.json",
       "dist/opencode/.aidlc/tools/data/stage-graph.json",
+      "dist/kiro-crew/.kiro-crew/tools/data/stage-graph.json",
       "dist/cursor/.cursor/tools/data/stage-graph.json",
     ];
     for (const rel of graphs) {

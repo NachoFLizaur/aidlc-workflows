@@ -23,6 +23,9 @@ engine directories must still differ (the `kiro` and `kiro-ide` distributions ca
 
 ## Prerequisites
 
+Using the Crew dashboard instead? Follow the separate
+[Kiro Crew guide](kiro-crew.md); it does not use this IDE/CLI installation.
+
 - **Kiro IDE**, signed in, or **Kiro CLI** (`kiro-cli`), signed in
 - **Claude Opus 4.8** selected as the chat model (see the note above)
 - **bun** only when generating or running the source/development `dist/`

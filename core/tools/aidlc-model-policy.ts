@@ -46,6 +46,7 @@ export type ModelHarness =
   | "cursor"
   | "kiro"
   | "kiro-ide"
+  | "kiro-crew"
   | "opencode";
 export type ModelPolicyLayer =
   | "agent-exception"
@@ -145,6 +146,13 @@ export const HARNESS_HONESTY = Object.freeze({
     groupEffort: false,
     message:
       "Kiro IDE cannot express model or effort policy; its md-only agent surfaces carry no model keys, so set the chat model in the IDE picker.",
+  }),
+  "kiro-crew": Object.freeze({
+    model: false,
+    effort: false,
+    groupEffort: false,
+    message:
+      "Kiro Crew owns model selection; project agents inherit, and model and effort policy remain unexpressed without project-side model writes.",
   }),
   cursor: Object.freeze({
     model: false,

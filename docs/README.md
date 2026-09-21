@@ -2,7 +2,7 @@
 
 AI-DLC is a structured, gated methodology for AI-driven software development.
 This repository runs it natively in Claude Code, Kiro CLI, Kiro IDE, Codex CLI,
-Cursor, opencode, and GitHub Copilot.
+Cursor, opencode, GitHub Copilot, and Kiro Crew.
 
 ## Quick Start
 
@@ -27,6 +27,9 @@ since one opened with "Run as administrator" gets a warning and a prompt. If
 another session cannot find `aidlc`, open a new terminal. Use
 [`-NoModifyPath`](guide/18-install-and-lifecycle.md#windows-powershell) to skip
 both persistent and current-process PATH changes.
+
+Kiro Crew additionally requires Bun for host-side setup, hooks, and its MCP bridge;
+follow the [Crew setup guide](guide/harnesses/kiro-crew.md#install-and-verify).
 
 ### 2. Configure
 
@@ -62,6 +65,7 @@ provider setup, trust prompts, project refreshes, and the first workflow.
 | Cursor | [AI-DLC on Cursor](guide/harnesses/cursor.md) |
 | opencode | [AI-DLC on opencode](guide/harnesses/opencode.md) |
 | GitHub Copilot | [AI-DLC on GitHub Copilot](guide/harnesses/copilot.md) |
+| Kiro Crew | [AI-DLC on Kiro Crew](guide/harnesses/kiro-crew.md) |
 
 ## Choose Your Guide
 

@@ -18,6 +18,8 @@ that ship the neutral-only block. Keep those imports when merging project instru
 
 ## Layout: the engine dir and the .github shell
 
+For the dashboard-host alternative, see [AI-DLC on Kiro Crew](kiro-crew.md).
+
 - **`.aidlc/`** — the AIDLC engine tree (tools, hooks + the Copilot adapter,
   agents, knowledge, scopes, sensors, aidlc-common). Neither Copilot surface
   scans it; everything user-visible rides `.github/`.

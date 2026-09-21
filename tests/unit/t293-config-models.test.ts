@@ -256,7 +256,7 @@ describe("t293 model policy resolution", () => {
       schemaVersion: 1,
       preset: "balanced",
     };
-    for (const harness of ["kiro", "kiro-ide", "cursor", "copilot"] as const) {
+    for (const harness of ["kiro", "kiro-ide", "cursor", "copilot", "kiro-crew"] as const) {
       for (const [agent, tier] of [
         ["architect", "judgment"],
         ["product-lead", "balanced"],
@@ -359,6 +359,7 @@ describe("t293 model policy resolution", () => {
       ["kiro", ".kiro"],
       ["kiro-ide", ".kiro"],
       ["opencode", ".aidlc"],
+      ["kiro-crew", ".kiro-crew"],
     ];
     for (const [harness, dir] of roots) {
       const tiers = readAgentTiers(join(DIST, harness, dir));

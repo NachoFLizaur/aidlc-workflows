@@ -28,11 +28,9 @@
 // (uncommitted, per-user) modification, driven by the gitignored `active-space`
 // cursor.
 //
-// Why rewrite-in-place and not a symlink: a spike proved Kiro's resources glob
-// will not walk a symlinked root (plain `find` doesn't follow symlinks) and
-// Windows cannot portably create links — both DEAD. Plain file writes are the
-// only Windows-safe, Kiro-walkable mechanism. The CLI re-reads the rewritten
-// file on the next turn (spike-verified live on Claude + Kiro).
+// Kiro's resource glob is not replaced with a symlink; rewrite the active-space
+// references in place. Plain file writes avoid platform-specific link creation
+// and leave the rewritten include available for the CLI's next rescan.
 //
 // This is the ONLY runtime writer into the harness dir. Best-effort per surface:
 // a surface whose source can't be read/parsed is skipped, never corrupted — and
@@ -179,6 +177,22 @@ export function repointHarnessIncludes(projectDir: string, space?: string): stri
   const harness = harnessDir(); // ".claude" | ".kiro" | ".codex" | open-set
   const harnessRoot = join(projectDir, harness);
   const written: string[] = [];
+
+  if (harness === ".kiro-crew") {
+    // Only project-owned engine personas carry mutable memory pointers.
+    // Other host trees and shared App Kit agents remain untouched.
+    const agentsDir = join(harnessRoot, "agents");
+    if (existsSync(agentsDir)) {
+      for (const name of readdirSync(agentsDir).sort()) {
+        if (!name.endsWith(".md")) continue;
+        const p = join(agentsDir, name);
+        const raw = readSafe(p);
+        if (raw === null) continue;
+        repointFile(p, join(harness, "agents", name), raw, sp, repointOpencodeAgentMemory, written);
+      }
+    }
+    return written;
+  }
 
   if (harness === ".claude") {
     const stubPath = join(harnessRoot, "rules", "aidlc.md");

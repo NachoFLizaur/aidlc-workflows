@@ -367,6 +367,13 @@ first-party `dist/plugins/<name>/<harness>/` trees, so its byte-parity guard als
 guards external builds. Publish the output to a git repo with semver tags and a
 `marketplace.json`; teams then install through the host's native commands.
 
+Crew emits `.kiro-crew-plugin/plugin.json`, separate from its AI-DLC App Kit.
+Its inventory is current-root-only: use `AIDLC_PLUGIN_ROOT` or `PLUGIN_ROOT`,
+not a foreign harness registry. This projection does not provide Crew store
+installation or automatic hook delivery. Without a Crew dispatch inventory,
+composition refuses plugin stages needing delegation or reviewers; inline
+stages without reviewers can compose. Full-inventory pruning remains unavailable.
+
 ### Claude / Codex (host store)
 
 ```bash

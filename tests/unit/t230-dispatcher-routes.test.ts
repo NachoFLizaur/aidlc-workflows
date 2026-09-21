@@ -3134,6 +3134,15 @@ describe("t230 dispatcher hook routing", () => {
     },
   );
 
+  test("Crew adapter route forwards stdin, extra argv and its own harness identity", () => {
+    const project = makeProject(); const hooks = join(project, ".kiro-crew/hooks"); mkdirSync(hooks, { recursive: true });
+    cpSync(join(REPO_ROOT, "tests/fixtures/kiro-crew-adapter/aidlc-kiro-crew-adapter.ts"), join(hooks, "aidlc-kiro-crew-adapter.ts"));
+    const input = '{ "parent_session_key": "dashboard:dispatcher", "extra": true }\n';
+    const result = viaDispatcher(["engine", "adapter", "kiro-crew", "PreToolUse", "literal value"], project, { AIDLC_HARNESS_NAME: "claude", AIDLC_HARNESS_DIR: ".claude" }, input);
+    expect(result.exitCode).toBe(0);
+    expect(JSON.parse(result.stdout.toString())).toEqual({ target: "PreToolUse", input, extraArgs: ["literal value"], harnessName: "kiro-crew", harnessDir: ".kiro-crew" });
+  });
+
   test("a compiled engine resolves hooks and adapters only from its packaged runtime", () => {
     // A native project holds copies of the hook and adapter files. The compiled
     // engine must not prefer them, or a changed project would run in place of

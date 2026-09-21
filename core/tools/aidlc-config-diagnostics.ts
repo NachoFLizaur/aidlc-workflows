@@ -23,7 +23,7 @@ import {
   discoverProjectHarnesses,
 } from "./aidlc-runtime-paths.ts";
 import { readBoundedRegularFile } from "./aidlc-inline-context.ts";
-import type { ModelHarness } from "./aidlc-model-policy.ts";
+import { isModelHarness, type ModelHarness } from "./aidlc-model-policy.ts";
 import {
   LOCAL_SETTINGS_FILE,
   localSettingsPath,
@@ -48,13 +48,14 @@ export type RuntimeRecord = {
 // answers use `current`, `amazon-bedrock`, or `other`.
 export type ProviderKind = "current" | "amazon-bedrock" | "builtin" | "other";
 
-// Kiro CLI and Kiro IDE provide their own model access. AI-DLC has no provider
+// Kiro CLI, Kiro IDE, and Kiro Crew manage model access. AI-DLC has no provider
 // decision to ask, write, or check for them, even when a legacy answer exists.
-export type BedrockOrientedHarness = Exclude<ModelHarness, "kiro" | "kiro-ide">;
+export type BedrockOrientedHarness = Exclude<ModelHarness, "kiro" | "kiro-ide" | "kiro-crew">;
 
 const HARNESS_OWNED_MODEL_ACCESS: ReadonlySet<ModelHarness> = new Set<ModelHarness>([
   "kiro",
   "kiro-ide",
+  "kiro-crew",
 ]);
 
 export function harnessOwnsModelAccess(
@@ -63,7 +64,10 @@ export function harnessOwnsModelAccess(
   return HARNESS_OWNED_MODEL_ACCESS.has(harness);
 }
 
-export function ownedModelAccessFact(product: string): string {
+export function ownedModelAccessFact(product: string, harness?: ModelHarness): string {
+  if (harness === "kiro-crew") {
+    return `${product} manages model access; AI-DLC configures no project model provider. Access depends on your Crew provider configuration.`;
+  }
   return `Model access comes with ${product}; AI-DLC configures no model provider for it.`;
 }
 
@@ -474,15 +478,7 @@ export function readConfigDiagnosticRecords(harnessRoot: string): ConfigDiagnost
     );
   }
   const distribution = value.distribution;
-  if (
-    distribution !== "claude" &&
-    distribution !== "codex" &&
-    distribution !== "copilot" &&
-    distribution !== "cursor" &&
-    distribution !== "kiro" &&
-    distribution !== "kiro-ide" &&
-    distribution !== "opencode"
-  ) {
+  if (typeof distribution !== "string" || !isModelHarness(distribution)) {
     throw new Error(`${path}: distribution must name a supported harness`);
   }
   const providers = normalizeProvidersRecord(value.providers);
@@ -830,6 +826,10 @@ const HARNESS_CLI: Record<
     command: "kiro-cli",
     required: false,
     install: "Kiro CLI is optional here: install it only to run AI-DLC from a terminal, and ensure `kiro-cli --version` works.",
+  },
+  "kiro-crew": {
+    required: false,
+    install: "Kiro Crew manages its execution backend; no project-side backend CLI is selected by AI-DLC.",
   },
   opencode: {
     command: "opencode",

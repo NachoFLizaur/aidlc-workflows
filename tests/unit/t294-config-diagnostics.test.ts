@@ -579,6 +579,7 @@ describe("t294 runtime diagnostics", () => {
   });
 
   test("harness CLI probes guard missing commands and enforce version floors", () => {
+    expect(probeHarnessCli("kiro-crew", { which: () => { throw new Error("host must not invoke a project backend"); } })).toMatchObject({ required: false, status: "not-applicable" });
     const missingClaude = probeHarnessCli("claude", { which: () => null });
     expect(missingClaude).toEqual(expect.objectContaining({
       command: "claude",
@@ -737,6 +738,7 @@ describe("t294 provider diagnostics", () => {
       ["kiro", ".kiro", "settings/mcp.json"],
       ["kiro-ide", ".kiro", "tools/data/harness.json"],
       ["copilot", ".aidlc", "tools/data/harness.json"],
+      ["kiro-crew", ".kiro-crew", "tools/data/harness.json"],
       ["cursor", ".cursor", "cli.json"],
     ] as const)("%s leaves its owned surface unchanged", (harness, dir, file) => {
       const root = temp(`aidlc-t294-provider-${harness}-`);

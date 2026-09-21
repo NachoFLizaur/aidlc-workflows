@@ -35,6 +35,12 @@ the body is for the agent's own framing, and you write it to match the
 structure of the shipped files. The packager adds the mandatory delegated
 knowledge preflight to every harness projection.
 
+Crew projects core personas to `.kiro-crew/agents/` for explicit reads, then
+registers the shipped role agents separately through the App Kit role map.
+Copying a new persona there does not register a Crew dispatch target. Plugin
+stages requiring delegation or reviewers are refused on Crew; use the
+[plugin contract](10-authoring-a-plugin.md) rather than inventing dispatch names.
+
 Here is the frontmatter from a real agent, authored at
 `core/agents/aidlc-architect-agent.md`:
 

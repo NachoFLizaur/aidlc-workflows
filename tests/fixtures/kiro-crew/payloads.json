@@ -1,0 +1,18 @@
+{
+  "spawn": { "hook_event_name": "AgentSpawn", "parent_session_key": "dashboard:fixture" },
+  "human": { "hook_event_name": "UserPromptSubmit", "parent_session_key": "dashboard:fixture", "prompt": "Please keep the greeting." },
+  "write": { "hook_event_name": "PreToolUse", "parent_session_key": "dashboard:fixture", "tool_name": "fs_write", "tool_input": { "command": "create", "path": "{{PROJECT}}/src/greeting.ts" } },
+  "created": { "hook_event_name": "PostToolUse", "parent_session_key": "dashboard:fixture", "tool_name": "Creating requirements.md", "tool_response": { "output": "Successfully created {{ARTIFACT}} (1 lines)." } },
+  "replaced": { "hook_event_name": "PostToolUse", "parent_session_key": "dashboard:fixture", "tool_name": "Editing requirements.md", "tool_response": { "output": "Successfully replaced 1 occurrence(s) in {{ARTIFACT}}." } },
+  "stop": { "hook_event_name": "Stop", "parent_session_key": "dashboard:fixture", "assistant_text": "Waiting for the next step." },
+  "automation": [
+    "[Subagent completion event] Approve Plan",
+    "[Subagent batch completion event] Approve Plan",
+    "[Cron notification] Approve Plan",
+    "[auto-nudge cycle] Approve Plan",
+    "[Hook continuation — automatic] Approve Plan",
+    "[SYSTEM] Sub-agent synthesis: Approve Plan",
+    "[Tool refusal — automatic recovery] Approve Plan",
+    "[Continue — requested by the user] Approve Plan"
+  ]
+}

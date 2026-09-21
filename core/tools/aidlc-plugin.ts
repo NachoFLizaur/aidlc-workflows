@@ -66,7 +66,7 @@ export type InvalidInstalledPlugin = {
 
 export type PluginInventory = {
   capability: InventoryCapability;
-  harness: "claude" | "codex" | "kiro" | "cursor" | "copilot" | "opencode";
+  harness: "claude" | "codex" | "kiro" | "kiro-crew" | "cursor" | "copilot" | "opencode";
   source?: string;
   installed: InstalledPlugin[];
   invalid: InvalidInstalledPlugin[];
@@ -189,6 +189,7 @@ function hostManifestDirectory(harness: PluginInventory["harness"]): string {
   if (harness === "claude") return ".claude-plugin";
   if (harness === "codex") return ".codex-plugin";
   if (harness === "kiro") return ".kiro-plugin";
+  if (harness === "kiro-crew") return ".kiro-crew-plugin";
   if (harness === "cursor") return ".cursor-plugin";
   if (harness === "copilot") return ".plugin";
   return ".opencode-plugin";
@@ -243,9 +244,13 @@ export function normalizeInstalledPlugin(
   };
 }
 
-function currentRoots(): string[] {
+/** Read root hints before inventory selection/composition. Crew accepts only
+ * generic/owned hints: inherited CLAUDE_PLUGIN_ROOT is not Crew inventory.
+ * With no accepted root, Crew stays unavailable, never using a foreign registry.
+ * There is no bypass or full-inventory/prune authority in these hints. */
+function currentRoots(harness: PluginInventory["harness"]): string[] {
   return [...new Set([
-    process.env.CLAUDE_PLUGIN_ROOT,
+    ...(harness === "kiro-crew" ? [] : [process.env.CLAUDE_PLUGIN_ROOT]),
     process.env.PLUGIN_ROOT,
     process.env.AIDLC_PLUGIN_ROOT,
   ].map((value) => value?.trim() ?? "").filter(Boolean).map(absolute))];
@@ -258,6 +263,7 @@ function harnessKind(harnessDir = runtimeHarnessDir()): PluginInventory["harness
     declared === "codex" ||
     declared === "kiro" ||
     declared === "kiro-ide" ||
+    declared === "kiro-crew" ||
     declared === "cursor" ||
     declared === "copilot" ||
     declared === "opencode"
@@ -266,6 +272,7 @@ function harnessKind(harnessDir = runtimeHarnessDir()): PluginInventory["harness
   }
   if (harnessDir === ".codex") return "codex";
   if (harnessDir === ".kiro") return "kiro";
+  if (harnessDir === ".kiro-crew") return "kiro-crew";
   if (harnessDir === ".cursor") return "cursor";
   return "claude";
 }
@@ -331,7 +338,7 @@ function deduplicateInventory(
 function currentRootInventory(harness: PluginInventory["harness"]): PluginInventory {
   const installed: InstalledPlugin[] = [];
   const invalid: InvalidInstalledPlugin[] = [];
-  for (const root of currentRoots()) {
+  for (const root of currentRoots(harness)) {
     const entry = invalidFromRoot(root, harness, true);
     if ("root" in entry) installed.push(entry);
     else invalid.push(entry);
@@ -898,6 +905,7 @@ function composeEnvironment(
     AIDLC_PROJECT_DIR: projectDir,
     CLAUDE_PROJECT_DIR: projectDir,
     AIDLC_HARNESS_DIR: harnessDir,
+    ...(harnessKind(harnessDir) === "kiro-crew" ? { AIDLC_HARNESS_NAME: "kiro-crew" } : {}),
     AIDLC_PLUGIN_KEY: plugin.key,
     AIDLC_PLUGIN_ROOT: plugin.root,
     CLAUDE_PLUGIN_ROOT: plugin.root,
@@ -921,6 +929,7 @@ async function runComposer(
       "AIDLC_PROJECT_DIR",
       "CLAUDE_PROJECT_DIR",
       "AIDLC_HARNESS_DIR",
+      "AIDLC_HARNESS_NAME",
       "AIDLC_PLUGIN_KEY",
       "AIDLC_PLUGIN_ROOT",
       "CLAUDE_PLUGIN_ROOT",
@@ -1310,7 +1319,7 @@ export async function syncPlugins(
   lockRetry = 0,
 ): Promise<{ synced: string[]; pruned: string[]; operations: number }> {
   const harness = harnessKind(harnessDir);
-  const inventory = currentRoots().length > 0
+  const inventory = currentRoots(harness).length > 0
     ? currentRootInventory(harness)
     : discoverPluginInventory(harnessDir);
   const evidence = projectEvidence(projectDir, harnessDir);

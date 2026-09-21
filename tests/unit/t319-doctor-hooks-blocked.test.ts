@@ -208,7 +208,7 @@ describe("t319 doctor detects hooks blocked before their first heartbeat", () =>
 
   // Only a harness that ships hookActivation gets the not-run-yet warning or
   // Kiro IDE's steps; every other harness keeps the fresh-install advisory.
-  for (const harness of ["claude", "kiro", "codex", "cursor", "opencode", "copilot"]) {
+  for (const harness of ["claude", "kiro", "codex", "cursor", "opencode", "copilot", "kiro-crew"]) {
     test(`${harness} before any heartbeat keeps the fresh-install advisory with no Kiro IDE advice`, () => {
       const run = runUtility(freshProject(), ["doctor", "--verbose"], {
         AIDLC_HARNESS_NAME: harness,

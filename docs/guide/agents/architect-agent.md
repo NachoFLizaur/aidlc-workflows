@@ -8,6 +8,10 @@ The aidlc-architect-agent leads the most stages of any single agent in the lifec
 
 ## Stages Led
 
+On Kiro Crew, the persona is `.kiro-crew/agents/aidlc-architect-agent.md` and
+the registered dispatch name is `aidlc-crew-architect-agent`. See
+[Crew agent use](../harnesses/kiro-crew.md#daily-use) for transport and model ownership.
+
 | Stage | Phase | Description |
 |-------|-------|-------------|
 | 1.3 Feasibility & Constraints | Ideation | Technical feasibility assessment and constraint analysis |

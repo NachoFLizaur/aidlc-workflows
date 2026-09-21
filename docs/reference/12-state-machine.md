@@ -14,6 +14,12 @@ Three nested state machines drive AI-DLC: **workflow**, **phase**, and **stage**
 
 ## Why three state machines
 
+On Crew, host transport state is separate again: `spawn_run` completion and
+dispatch-ledger settlement do not transition the workflow. Pipeline links,
+reviews, and Unit completion still need their tool-owned engine receipts.
+Question cards and automatic continuations are not human approval. See the
+[Crew hook contract](06-hooks-and-tools.md#kiro-crew-hook-contract).
+
 A workflow completes by passing through phases; a phase completes by passing through its in-scope stages; a stage completes when its approval gate closes. Each layer owns a distinct decision:
 
 - **Workflow** — is the overall job running, or done?

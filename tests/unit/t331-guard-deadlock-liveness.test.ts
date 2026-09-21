@@ -108,6 +108,7 @@ const PACKAGED_HARNESSES = [
   { name: "kiro", engineDir: ".kiro" },
   { name: "kiro-ide", engineDir: ".kiro" },
   { name: "opencode", engineDir: ".aidlc" },
+  { name: "kiro-crew", engineDir: ".kiro-crew" },
 ] as const;
 
 afterEach(() => {

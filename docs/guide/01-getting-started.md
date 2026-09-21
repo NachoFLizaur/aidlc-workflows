@@ -57,6 +57,7 @@ Replace `claude` with the harness you use:
 | Cursor | `cursor` | Open Cursor or run `agent` | `/aidlc` |
 | opencode | `opencode` | `opencode` | `/aidlc` |
 | GitHub Copilot CLI >= 1.0.74 / VS Code >= 1.130 | `copilot` | Copilot CLI or VS Code | `/aidlc` |
+| Kiro Crew | `kiro-crew` plus [App Kit setup](harnesses/kiro-crew.md#install-and-verify) | Dashboard with project selected | Plain-text `aidlc` to **aidlc-crew** |
 
 A bare `aidlc config` starts the interactive setup when a terminal is
 available. It detects installed harnesses, provider state, runtime needs, and
@@ -109,6 +110,7 @@ still apply.
 | Cursor | Sign in to the IDE or CLI | [Cursor](harnesses/cursor.md) |
 | opencode >= 1.17 | Configure the session provider globally | [opencode](harnesses/opencode.md) |
 | GitHub Copilot | Trust the project folder; use GitHub sign-in or BYOK | [GitHub Copilot](harnesses/copilot.md) |
+| Kiro Crew >= 0.6.0 | Bun, authenticated Kiro CLI backend, operator app trust, and registered hooks/MCP | [Kiro Crew](harnesses/kiro-crew.md) |
 
 ## AWS Bedrock Setup
 
@@ -200,6 +202,7 @@ After config, complete any action named in its output:
 | Cursor | Open the configured project or run `agent` |
 | opencode | Start `opencode` in the project |
 | GitHub Copilot | Trust the project folder |
+| Kiro Crew | Complete the five setup steps, then select the project and **aidlc-crew** in a new dashboard chat |
 
 In Kiro IDE, the **aidlc** agent appears in the agent picker only after you
 trust the folder and reload the window: if the Restricted Mode banner shows,
