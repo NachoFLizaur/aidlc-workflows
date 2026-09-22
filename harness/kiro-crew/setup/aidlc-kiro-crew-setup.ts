@@ -7,6 +7,7 @@ import { closeSync, constants, cpSync, existsSync, fstatSync, lstatSync, mkdirSy
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath } from "node:url";
+import { validateCrewStamp } from "../hooks/aidlc-kiro-crew-hook-entry.ts";
 
 type ObjectValue = Record<string, unknown>;
 export const object = (value: unknown): value is ObjectValue => value !== null && typeof value === "object" && !Array.isArray(value);
@@ -145,7 +146,7 @@ export const isRecordedKey = (home: string, key: string): boolean => crewRecorde
 /** Corroborate the key before every bind, including idempotent ones. An identical
  * binding preserves bytes/time; explicit valid project selection may replace a
  * corrupt or different binding. No bypass or cwd fallback; not a trust grant. */
-export function bindCrewSession(home: string, project: string, key: string) {
+export function bindCrewSession(home: string, project: string, key: string, source?: "project-dir") {
   if (!isRecordedKey(home, key)) throw new Error(`Cannot bind Crew session: session_key is not a Crew-recorded key for this home ${home}; use the exact key shown in ${join(home, "session_pid_<pid>.txt")}.`);
   const projectDir = projectPath(project);
   const keyHash = sessionHash(key);
@@ -155,11 +156,15 @@ export function bindCrewSession(home: string, project: string, key: string) {
     try {
       const old: unknown = JSON.parse(before);
       if (object(old) && old.projectDir === projectDir && typeof old.boundAt === "string" && Number.isFinite(Date.parse(old.boundAt))) {
+        if (source && old.source !== source) {
+          const changed = atomicText(path, before, `${JSON.stringify({ ...old, source }, null, 2)}\n`);
+          return { keyHash, projectDir, path, changed };
+        }
         return { keyHash, projectDir, path, changed: false };
       }
     } catch { /* Explicit binding repairs routing only, not configuration. */ }
   }
-  const changed = atomicText(path, before, `${JSON.stringify({ projectDir, boundAt: new Date().toISOString() }, null, 2)}\n`);
+  const changed = atomicText(path, before, `${JSON.stringify({ projectDir, boundAt: new Date().toISOString(), ...(source ? { source } : {}) }, null, 2)}\n`);
   return { keyHash, projectDir, path, changed };
 }
 
@@ -239,6 +244,200 @@ function agent(doc: ObjectValue): ObjectValue {
 function effectiveAgent(home: string) {
   const base = agent(document(join(home, "config.json")).value); const local = agent(document(join(home, "config.local.json")).value);
   return { local, effective: { ...base, ...local } };
+}
+
+/** Select a parent project before binding/init writes and on selection reuse.
+ * The published env key must equal the resolved subagent key; first-run children
+ * need no map entry. Require a canonical stamped project inside effective cwd
+ * roots, with local lists replacing base lists. Bad config or identity refuses;
+ * no config writes or bypass. This is routing consistency, not authentication.
+ * Terminal operator binding without Crew env keeps its recorded-key recovery. */
+export function crewSubagentProject(home: string, project: string, key: string): string {
+  const caller = process.env.KIROCREW_SESSION_KEY;
+  if (!caller?.trim() || /[\0\r\n]/.test(caller) || caller !== key) throw new Error("project_dir requires the caller's recorded Crew session key; no constructed identity or parent-key substitution.");
+  if (!caller.startsWith("subagent:") || caller.length === "subagent:".length) throw new Error("conductor sessions select by launch/session-map cwd; project_dir is for subagent sessions");
+  const canonical = projectPath(project);
+  const stamp = validateCrewStamp(join(canonical, ".kiro-crew/tools/data/aidlc-stamp.json"));
+  if (!stamp.ok) throw new Error(`${stamp.reason}; project_dir requires a set-up project.`);
+  let roots: string[];
+  try {
+    const { effective } = effectiveAgent(home);
+    roots = strings(effective[ROOTS] === undefined ? [] : effective[ROOTS], `agent.${ROOTS}`);
+  } catch (error) { throw new Error(`Cannot read effective agent.${ROOTS} for project_dir: ${error instanceof Error ? error.message : String(error)}`); }
+  const allowed = roots.some((root) => {
+    const expanded = root === "~" ? process.env.HOME || homedir() : root.startsWith("~/") ? join(process.env.HOME || homedir(), root.slice(2)) : root;
+    if (!isAbsolute(expanded)) return false;
+    try { const r = relative(realpathSync(expanded), canonical); return r === "" || (r !== ".." && !r.startsWith(`..${sep}`) && !isAbsolute(r)); } catch { return false; }
+  });
+  if (!allowed) throw new Error(`project_dir ${canonical} is outside effective agent.${ROOTS}; ask the operator to authorize the project in Crew.`);
+  return canonical;
+}
+
+/** Read replacing backend selections per report and before project/bind collision
+ * checks. Unknown axes fail; the global axis sets known-selection severity, while
+ * member-DM selection describes no child inheritance. Runtime observations never
+ * grant admission, change selection or disable guards. Core keeps its own twin. */
+export function backend(home: string, effective = effectiveAgent(home).effective) {
+  const backendSupport = {
+    "kiro-cli": "Kiro CLI backend",
+    claude: "limited support: conductor and distinct-directory child sessions; file-tool write provenance, native delegation denial and running-child steering are not supported; see guide §Claude backend",
+    kas: "not supported by this integration",
+    codex: "not supported by this integration",
+  };
+  const axis = (value: unknown, fallback: string) => {
+    const selected = value === undefined ? fallback : value;
+    const name = selected === "" ? "kiro-cli" : selected;
+    // Only the empty string selects Kiro; never normalize unknown values/types.
+    const known = selected === "" || selected === "claude" || selected === "kas" || selected === "codex";
+    return { name: known ? name as keyof typeof backendSupport : "unrecognized" as const,
+      detail: known ? `${name} — ${backendSupport[name as keyof typeof backendSupport]}` : `unrecognized (${JSON.stringify(selected)})` };
+  };
+  const global = axis(effective.acp_backend, "");
+  const member = axis(effective.member_acp_backend, "kas");
+  const status: "ok" | "warn" | "fail" = global.name === "unrecognized" || member.name === "unrecognized" ? "fail" : global.name === "kiro-cli" ? "ok" : "warn";
+  const detail = `agent.acp_backend=${global.detail}; agent.member_acp_backend=${member.detail} (member-DM only; not delegated-child selection)`;
+  return { global: global.name, member: member.name, status, detail, observations: backendRuntime(home, global.name === "claude" || member.name === "claude") };
+}
+
+/** Read the whole provider map before reporting, bounded to 4 MiB/10,000 entries.
+ * Reuse resolved config axes; this is observation, not backend admission. KAS
+ * shares a provider family, not support. Unknown labels collapse without printing
+ * keys; current identity is override/env only, never parent/project inference.
+ * Missing current records, malformed data or mixed families warn and keep the
+ * conductor's preflight hold. No writes, live-process proof or bypass. */
+export function crewComposition(home: string, selection: Pick<ReturnType<typeof backend>, "global" | "member">): Row {
+  const family = (name: string) => name === "kiro-cli" || name === "kas" ? "kiro-family" : name;
+  const providerFamily = (label: string) => label === "acp" || label === "kiro" || label === "kas" ? "kiro-family" : label === "claude_code" ? "claude" : label === "codex" ? "codex" : "unrecognized";
+  const current = process.env.AIDLC_SESSION_OVERRIDE || (process.env.KIROCREW_SESSION_KEY ? `crew-${sessionHash(process.env.KIROCREW_SESSION_KEY)}` : undefined);
+  const counts = new Map<string, number>(); const families = new Set<string>();
+  let entries = 0; let mapIssue = ""; let currentLabel: string | undefined;
+  try {
+    const map: unknown = JSON.parse(crewIdentityText(join(home, "session_map.json"), 4 * 1024 * 1024));
+    if (!object(map)) throw new Error("invalid map");
+    const records = Object.entries(map);
+    if (records.length > 10_000) throw new Error("entry limit");
+    entries = records.length;
+    for (const [key, record] of records) {
+      const raw = object(record) && typeof record.provider === "string" ? record.provider : "";
+      const kind = providerFamily(raw); const label = kind === "unrecognized" ? "unrecognized" : raw;
+      counts.set(label, (counts.get(label) ?? 0) + 1); families.add(kind);
+      if (current === `crew-${sessionHash(key)}`) currentLabel = label;
+    }
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") mapIssue = "session_map.json unreadable, malformed or over limits (4 MiB / 10000 entries); composition unverified";
+  }
+  const providers = counts.size ? `{${[...counts].sort(([a], [b]) => a.localeCompare(b)).map(([label, count]) => `${label} (${count})`).join(", ")}}` : "{}";
+  const observed = `observed providers: ${providers}`;
+  const recordNote = mapIssue || (entries ? `${entries} session records observed (labels only; not live process verification)` : "no session records observed; classification from config only");
+  const currentNote = !current ? "current session not selected" : currentLabel ? `current session provider: ${currentLabel}` : "current session provider unverified (no matching map entry; no parent-backend inference)";
+  const notes = `${observed}; ${recordNote}; ${currentNote}; unrecorded children are not verified`;
+  const reasons: string[] = [];
+  const known = selection.global !== "unrecognized" && selection.member !== "unrecognized";
+  if (known && family(selection.global) !== family(selection.member)) reasons.push(`member-DM selection is a separate axis (member_acp_backend=${selection.member}, agent.acp_backend=${selection.global}); member-DM sessions can dispatch children on ${selection.global}`);
+  if (selection.global !== "unrecognized" && [...families].some((kind) => kind !== "unrecognized" && kind !== family(selection.global))) reasons.push(`records-vs-config disagreement: agent.acp_backend=${selection.global}, recorded backends=${[...families].sort().join(", ")}`);
+  if (reasons.length) return { what: "Crew composition", status: "warn", detail: `mixed backend configuration: ${reasons.join("; ")}; children follow agent.acp_backend, member DMs follow member_acp_backend; ${notes}` };
+  if (!known || mapIssue || families.has("unrecognized") || (current && !currentLabel)) return { what: "Crew composition", status: "warn", detail: `backend composition could not be verified: agent.acp_backend=${selection.global}, member_acp_backend=${selection.member}; compatibility is described in the Backend row; ${notes}` };
+  return { what: "Crew composition", status: selection.global === "kiro-cli" ? "ok" : "warn", detail: `${selection.global === "kiro-cli" ? "consistent Kiro CLI configuration" : `consistent backend configuration with limitations: ${selection.global}`}; compatibility is described in the Backend row; ${notes}` };
+}
+
+/** Bounded PATH-resolved --version calls and no-follow package metadata reads.
+ * No shell, Python import, adapter launch or install. Missing/failed observations
+ * stay unknown and never decide admission. This process's PATH is not the live
+ * gateway's augmented PATH; no observation bypasses a compatibility limitation. */
+function backendRuntime(home: string, claude: boolean): string[] {
+  const version = (bin: string | null) => {
+    if (!bin) return "unknown";
+    try {
+      const r = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024,
+        env: { ...process.env, KIROCREW_HOME: home, KIRO_HOME: join(home, "kiro") } });
+      return !r.error && r.status === 0 ? r.stdout.trim() || "unknown" : "unknown";
+    } catch { return "unknown"; }
+  };
+  const crewOutput = version(Bun.which("kirocrew"));
+  let crewVersion = /^kirocrew\s+([\w.+-]+)\s*$/m.exec(crewOutput)?.[1] ?? "unknown";
+  let distribution = "unknown";
+  const packagePath = /(?:^|\s)(\/[^\r\n]*?\/kiro_crew)(?:\/(?:__init__|cli)\.py)?["'):]?(?:\r?$|\s)/m.exec(crewOutput)?.[1];
+  if (packagePath) {
+    try { crewVersion = /^__version__\s*=\s*["']([^"'\r\n]+)["']/m.exec(crewIdentityText(join(packagePath, "__init__.py"), 64 * 1024))?.[1] ?? crewVersion; } catch { /* Unknown source version. */ }
+    try { distribution = /^DISTRIBUTION\s*=\s*["']([^"'\r\n]+)["']/m.exec(crewIdentityText(join(packagePath, "_build_info.py"), 64 * 1024))?.[1] ?? "unknown"; } catch { /* Never infer distribution from version. */ }
+  }
+  const observations = [`Crew: ${crewVersion}; distribution: ${distribution} (version observation only; does not establish backend compatibility)`];
+  if (claude) {
+    const override = process.env.CLAUDE_AGENT_ACP_BIN;
+    const adapter = Bun.which(override || "claude-agent-acp");
+    let adapterVersion = "unknown";
+    if (adapter) try {
+      const dir = dirname(realpathSync(adapter));
+      for (const root of [dir, dirname(dir)]) {
+        try {
+          const pkg = JSON.parse(crewIdentityText(join(root, "package.json"), 64 * 1024));
+          if (pkg.name === "@agentclientprotocol/claude-agent-acp" && typeof pkg.version === "string") { adapterVersion = pkg.version; break; }
+        } catch { /* No install or launch to discover package metadata. */ }
+      }
+    } catch { /* Resolution raced; version remains unknown. */ }
+    const cli = Bun.which("claude"); const node = Bun.which("node");
+    const oneLine = (s: string) => s.replace(/[\r\n\t]/g, " ").slice(0, 512);
+    observations.push(`Claude adapter: ${adapter || "not found (Crew resolver step 6 would fail)"}; source: ${override ? "CLAUDE_AGENT_ACP_BIN" : "PATH"}; package version: ${oneLine(adapterVersion)}`,
+      `Claude CLI: ${oneLine(version(cli))}${cli ? ` (${cli})` : " (not found on PATH)"}`,
+      `Node: ${oneLine(version(node))}${node ? ` (${node})` : " (not found on PATH)"}; first node on PATH (shebang resolver); Crew's augmented PATH may differ`);
+  }
+  return observations;
+}
+
+/** Inspect project paths before installer, cwd-root or CLI binding writes.
+ * Only ENOENT is absent; unsafe/unreadable inspection fails closed. No-follow
+ * bounded reads inspect seed/engine markers, never traverse non-directory .claude.
+ * availableModels-only JSON is a warning heuristic, not ownership proof. Global
+ * ~/.claude is existence-only. Fail stops project/bind; status reports; warnings
+ * do not refuse setup. Disabled only when neither effective axis is Claude.
+ * No bypass or repair; this snapshot does not guard direct MCP/live hook writes.
+ * Stop competing writers and recheck. Core maintains an independent twin. */
+export function claudeProjectCollision(project: string, selection: Pick<ReturnType<typeof backend>, "global" | "member">, home = process.env.HOME || homedir()): Row {
+  const what = "Claude project collision";
+  const help = "Missing or invalid project stamps are checked by the bridge: Cannot bind Crew session: Invalid or mismatched stamp. Setup never modifies Claude files.";
+  const remediation = "Remediation: move or remove these files (operator action; setup never modifies them), or use a clean project. Not a Kiro CLI concern.";
+  if (selection.global !== "claude" && selection.member !== "claude") return { what, status: "ok", detail: selection.global === "kiro-cli" ? "not applicable (backend kiro-cli)" : "not applicable" };
+  const classes: string[] = []; const reasons: string[] = []; const paths: string[] = []; const warnings: string[] = [];
+  const present = (path: string) => {
+    try { return lstatSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+  };
+  const found = (id: string, reason: string, files: string[]) => {
+    if (files.length) { classes.push(id); reasons.push(`${reason} (${id})`); paths.push(...files); }
+  };
+  let inspection = "";
+  try {
+    const claude = present(join(project, ".claude"));
+    if (claude && !claude.isDirectory()) throw new Error(".claude is not a regular directory (symlink or other entry); not followed");
+    const local = ".claude/settings.local.json";
+    if (present(join(project, local))) {
+      let seed = false;
+      try { const value: unknown = JSON.parse(crewIdentityText(join(project, local), 64 * 1024)); seed = object(value) && Object.keys(value).every((key) => key === "availableModels"); } catch { /* Unverifiable seeds refuse without repair. */ }
+      if (seed) warnings.push("Crew seed present (transient; live session?) — .claude/settings.local.json matches the availableModels-only shape; ownership is not proven. Close the live session and recheck; setup never modifies it.");
+      else found("local-settings", "Crew withholds its MCP servers when the project already has Claude settings", [local]);
+    }
+    found("ambient-instructions", "ambient CLAUDE.md instructions coexist with the conductor prompt; unsupported combination", ["CLAUDE.md", ".claude/CLAUDE.md"].filter((file) => present(join(project, file))));
+    found("project-settings", "existing Claude Code configuration", present(join(project, ".claude/settings.json")) ? [".claude/settings.json"] : []);
+    found("project-integrations", "existing Claude Code configuration", [".claude/hooks", ".claude/agents", ".claude/skills"].filter((file) => {
+      const entry = present(join(project, file));
+      return entry && (!entry.isDirectory() || readdirSync(join(project, file)).length > 0);
+    }));
+    const harness = present(join(project, ".claude/tools/aidlc.ts")) ? [".claude/tools/aidlc.ts"] : [];
+    if (present(join(project, ".claude/CLAUDE.md"))) {
+      try {
+        const text = crewIdentityText(join(project, ".claude/CLAUDE.md"), 64 * 1024);
+        if (text.includes("This project uses AI-DLC (AI-Driven Development Life Cycle)") || /^@\.claude\/rules\/aidlc\.md\s*$/m.test(text)) harness.push(".claude/CLAUDE.md");
+      } catch { /* Ambient instructions already refuse even without a readable marker. */ }
+    }
+    found("existing-engine", "existing AIDLC Claude Code harness — two engines", harness);
+  } catch { inspection = "Project Claude configuration could not be safely inspected; collision check incomplete."; }
+  // Existence only, including dangling symlinks; never read global config.
+  try { if (present(join(home, ".claude"))) warnings.push("~/.claude exists — ambient user-level Claude settings/plugins load into every session; not isolated by KIROCREW_HOME (existence only; contents not read)."); }
+  catch { warnings.push("~/.claude existence could not be checked; ambient user-level Claude configuration is unverified (contents not read)."); }
+  const failed = classes.length > 0 || !!inspection;
+  const detail = failed
+    ? `Claude project collision: ${classes.join(", ") || "inspection incomplete"} — ${[...reasons, inspection].filter(Boolean).join(" / ")}${paths.length ? `. Files: ${[...new Set(paths)].join(", ")}.` : ""} ${remediation}`
+    : warnings.length ? "Claude project collision: none refusing." : "no ambient project Claude configuration detected";
+  return { what, status: failed ? "fail" : warnings.length ? "warn" : "ok", detail: [detail, ...warnings].join(" "), fix: help };
 }
 const hasAppTrust = (effective: ObjectValue): boolean => Array.isArray(effective.apps_trusted) && effective.apps_trusted.includes("aidlc") && Array.isArray(effective.apps_trusted_local) && effective.apps_trusted_local.includes("aidlc");
 function appendRoot(doc: ReturnType<typeof document>, roots: string[], project: string): string {
@@ -585,6 +784,12 @@ function next(o: Options, command: string, project = false) {
   return `bun ${quote(join(APP, "setup/aidlc-kiro-crew-setup.ts"))} ${command} --crew-home ${quote(o.home)}${project ? ` --project-dir ${quote(o.project)}` : ""}`;
 }
 const add = (report: Report, status: Row["status"], what: string, detail: string, fix?: string) => report.rows.push({ status, what, detail, ...(fix ? { fix } : {}) });
+function observeBackend(o: Options, report: Report, effective?: ObjectValue) {
+  if (report.rows.some((r) => r.what === "Backend selection")) return;
+  const observation = backend(o.home, effective);
+  add(report, observation.status, "Backend selection", `${observation.detail}\n  Observations (informational): ${observation.observations.join("\n    ")}`);
+  return observation;
+}
 function installed(project: string): boolean {
   try {
     const stamp = JSON.parse(readFileSync(join(project, ".kiro-crew/tools/data/aidlc-stamp.json"), "utf8"));
@@ -764,6 +969,7 @@ function status(o: Options, report: Report) {
     } catch { corruptBinding = true; return false; }
   });
   row(bound, "Conversation bound", bound ? "At least one binding targets this project; current dashboard slot is not verified by status." : corruptBinding ? "Corrupt binding found; preserve and inspect it before explicitly rebinding." : "No binding to this project; select it in the dashboard, then the first aidlc_status can auto-bind using Crew identity and a validated project selection.", corruptBinding ? `${next(o, "bind", true)} --session-key '<exact key from <home>/session_pid_<pid>.txt line 1>'` : "Select this project in a new dashboard conversation and message `aidlc-crew`; the first `aidlc_status` binds automatically", !corruptBinding);
+  observeBackend(o, report, effective);
 }
 const SETUP_STEPS: Record<string, number> = { "Project configured": 1, "Project authorized as cwd root": 1, "Trust granted": 2, "App installed+enabled": 3, "Hooks registered": 4, "Conversation bound": 5 };
 const setupStep = (row: Row): number => SETUP_STEPS[row.what] ?? 6;
@@ -782,6 +988,16 @@ function main() {
   let json = process.argv.includes("--json");
   try {
     const o = parse(process.argv.slice(2)); json = o.json;
+    if (["project", "status", "bind"].includes(o.command)) {
+      // Observe before installer, cwd-root or binding writes; status stays read-only.
+      const selection = observeBackend(o, report)!;
+      const collision = claudeProjectCollision(o.project, selection);
+      report.rows.push(collision);
+      if (o.command === "status") report.rows.push(crewComposition(o.home, selection));
+      if (collision.status === "fail" && o.command !== "status") {
+        print(report, json); process.exitCode = 1; return;
+      }
+    }
     switch (o.command) {
       case "project": configureProject(o, report); status(o, report); break;
       case "hooks": mergeHooks(o, report); break;
@@ -789,13 +1005,19 @@ function main() {
       case "trust": trust(o, report); break;
       case "bind": {
         if (o.key === undefined) throw new Error(`Cannot bind Crew session: bind requires --session-key with the exact key shown in ${join(o.home, "session_pid_<pid>.txt")}.`);
-        const binding = bindCrewSession(o.home, o.project, o.key);
+        // Crew sessions use the subagent selector; terminal recovery stays separate.
+        if (process.env.KIROCREW_SESSION_KEY !== undefined) {
+          try { o.project = crewSubagentProject(o.home, o.project, o.key); }
+          catch (error) { throw new Error(`Cannot bind Crew session: ${error instanceof Error ? error.message : String(error)}`); }
+        }
+        const binding = bindCrewSession(o.home, o.project, o.key, process.env.KIROCREW_SESSION_KEY === undefined ? undefined : "project-dir");
         if (binding.changed) report.changed.push(`Wrote ${binding.path}.`);
         add(report, "ok", "Conversation bound", `${binding.keyHash} → ${binding.projectDir}`);
         break;
       }
       case "status": status(o, report); break;
     }
+    observeBackend(o, report);
   } catch (error) { add(report, "fail", "Setup stopped", `${error instanceof Error ? error.message : String(error)}; correct the named condition, then retry`, `bun ${quote(fileURLToPath(import.meta.url))} ${process.argv.slice(2).map(quote).join(" ")}`); }
   print(report, json);
   if (report.rows.some((r) => r.status === "fail")) process.exitCode = 1;

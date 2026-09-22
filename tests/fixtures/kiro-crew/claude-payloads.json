@@ -1,0 +1,18 @@
+{
+  "request": { "hook_event_name": "PreToolUse", "parent_session_key": "{{KEY}}", "tool_name": "Bash", "tool_input": { "command": "cat > '{{ARTIFACT}}' <<'EOF'\n# Requirements\nEOF\nprintf 'ARTIFACT %s\\n' '{{ARTIFACT}}'", "description": "Write requirements and print the artifact path" } },
+  "receipt": { "hook_event_name": "PostToolUse", "parent_session_key": "{{KEY}}", "tool_response": { "output": "```console\nARTIFACT {{ARTIFACT}}\n```" } },
+  "failure": { "hook_event_name": "PostToolUse", "parent_session_key": "{{KEY}}", "tool_response": { "output": "```\nExit code 1\nnot a directory\n```" } },
+  "rejection": { "hook_event_name": "PostToolUse", "parent_session_key": "{{KEY}}", "tool_name": "Bash", "tool_response": { "output": "```\nUser refused permission to run tool\n```" } },
+  "omitted": ["Edit requirements.md", "Write requirements.md", "Preparing file…", "Read File", "ToolSearch", "None"],
+  "invalidOutputs": [
+    "```\nARTIFACT {{ARTIFACT}}\n```",
+    "```console\nARTIFACT {{ARTIFACT}}\n```\n```console\nextra\n```",
+    "```console\nARTIFACT {{ARTIFACT}}\nextra\n```",
+    "```console\nARTIFACT {{ARTIFACT}}\nARTIFACT {{ARTIFACT}}\n```",
+    "```console\nordinary output\n```",
+    "```console\nARTIFACT {{ARTIFACT}}\u0000\n```",
+    "```console\nARTIFACT {{ARTIFACT}}\r\n```"
+  ],
+  "providers": [["acp", "kiro"], ["kiro", "kiro"], ["kas", "kiro"], ["claude_code", "claude"], ["foreign", "unknown"], [null, "unknown"]],
+  "child": { "subagent_id": "child", "agent_role": "aidlc-crew-developer-agent" }
+}

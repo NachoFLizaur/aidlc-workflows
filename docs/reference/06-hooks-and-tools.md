@@ -13,7 +13,7 @@ the Crew home hook store; copying core scripts alone does not activate them.
 | `AgentSpawn` | Initialize an absent engine session binding; preserve valid bindings, including a null intent |
 | `UserPromptSubmit` | Record real human turns through the dispatcher; exclude child, automation, and continuation envelopes from answer authority |
 | `PreToolUse` | Inspect structured tool input, apply state-transition, plan-approval, review-freeze, and reviewer-scope guards; relay refusals |
-| `PostToolUse` | Detect conductor create/replace outputs within the selected record or CodeKB boundary and request core audit emission |
+| `PostToolUse` | Detect Kiro conductor create/replace outputs or correlated Claude conductor Bash receipts within the selected record or CodeKB boundary; request core audit emission |
 | `Stop` | Consult the dispatch ledger before core continuation; outstanding children suppress nudges, malformed ledgers suppress with a diagnostic |
 
 Identity, project selection, and engine binding are checked before core work.
@@ -28,7 +28,7 @@ containment. Display titles never become executable commands or write targets.
 Core policy switches still apply; there is no adapter-specific bypass.
 Child-hook delivery and arbitrary MCP write inspection are not guaranteed.
 
-Create/replace detection checks authorization freshness before emitting audit
+Kiro create/replace detection checks authorization freshness before emitting audit
 rows. Same-second ordering, duplicate rows, already-fresh files, and concurrent
 authorization replacement remain limitations. Detection is not prevention.
 Sensors, graph rebuild, state sync, session-end, compaction, subagent-stop,
@@ -36,11 +36,33 @@ statusline, usage folding, and dispatch-rule delivery are not registered.
 
 The conductor calls `aidlc_status` then doctor before workflow work and uses
 `aidlc_engine` with raw argv, not shell commands. The bridge refuses project
-overrides and bounds each subprocess to 120 seconds and 4 MiB output; failure
+overrides in engine argv. A child's `aidlc_bind_session` may select the parent's
+`project_dir` only after own-key subagent, stamp, and effective cwd-root checks.
+The bridge bounds each subprocess to 120 seconds and 4 MiB output; failure
 is not a success receipt. Host child completion must be correlated with the
 dispatch ledger, then paired with the engine receipts required by the owning
 protocol. Neither a question card nor an automatic continuation is approval.
 See [Crew setup and daily use](../guide/harnesses/kiro-crew.md).
+
+Claude receipts require an unnamed conductor Post with exactly one final-line
+`ARTIFACT <absolute path>` inside a single `console` fence. Only structured Bash
+permission requests passing every core guard record literal in-boundary paths;
+heredoc bodies supply no authority. Admission requires a regular non-symlink file,
+mtime at least the request arrival and any applicable authorization time floor.
+Missing/conflicting backend observations refuse guarded Pre and drop Post rows.
+Write/Edit have no success Post; pre-approved Bash without a request misses rows.
+Native Task/Agent denial is advisory on notifications; pre-approved reads bypass
+permission checks, so reviewer read scope is not contained on those paths.
+
+Identical commands coalesce within 2,000 ms of the earliest request. Each read
+prunes requests older than 10 minutes; at most 256 pending path entries fit.
+The newest prior match is consumed under lock before core audit emission; a lost
+emission stays consumed, but replay can match an older pending request. Failure
+Posts consume preceding requests, so unrelated concurrent failures can miss rows.
+Corruption, unsafe files, or contention refuses Pre/drops Post rows. New requests
+that would exceed capacity are refused; matching Posts can still consume entries.
+Fresh-file misattribution, identical concurrent commands, timestamp precision,
+and the authorization-check-to-audit race remain limits: detection, not prevention.
 
 > **Path convention.** State, audit, and artifacts live under the active intent's **record dir** — `aidlc/spaces/<space>/intents/<YYMMDD>-<label>/`, written `<record>/` below (a compact UTC date prefix plus a short kebab-case label so record dirs sort chronologically; the canonical id is the UUIDv7 in the `intents.json` registry row). The audit trail is a directory of per-clone shards under `<record>/audit/`, not a single file.
 

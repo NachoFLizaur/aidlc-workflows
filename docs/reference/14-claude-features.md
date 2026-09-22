@@ -43,6 +43,15 @@ equivalents see their guide chapters.
 
 ## Claude-specific
 
+**Claude Code directly is not Claude Code as a Crew backend.** The sections below
+describe the native `.claude/` harness. Crew keeps its engine in `.kiro-crew/`
+and uses App Kit/MCP transport; selecting Claude does not enable native hook parity.
+Claude children need task-carried persona/rule reads, own-key parent-project
+binding, and current-run ACK/Read verification. Crew cannot enforce App Kit native
+Task/Agent restrictions on notification paths or reviewer scope on pre-approved
+reads. File-tool writes lack success Posts; conductor Bash receipts are detection
+only. Follow the [Crew Claude limits](../guide/harnesses/kiro-crew.md#claude-code-backend).
+
 The sections that follow describe how Claude Code in particular expresses each
 primitive — its skill frontmatter, agent loading modes, `settings.json` blocks,
 and `.mcp.json` model. The other harnesses carry the same concepts through the

@@ -2,7 +2,7 @@
 import { afterEach, expect, test, setDefaultTimeout } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { delimiter, dirname, join } from "node:path";
 import { applyApp, bindCrewSession, checkAppIdentity, classifyApp, isInstalledInvocation, materializationPaths, materializeApp, materializeHooks, readMaterializationReceipt, verifyRegisteredSpecs, writeMaterializationReceipt } from "../../harness/kiro-crew/setup/aidlc-kiro-crew-setup.ts";
 import { cleanupTestProject, createTestProject, REPO_ROOT } from "../harness/fixtures.ts";
@@ -59,10 +59,10 @@ function doctorFixture() {
   mkdirSync(join(f.project, ".git")); f.install();
   const hooks = materializeHooks(JSON.parse(read(join(portable, "hooks.fragment.json"))).hooks, f.paths);
   json(join(f.home, "hooks.json"), { hooks });
-  const key = "dashboard:doctor"; json(join(f.home, "session_map.json"), { [key]: { cwd: f.project } });
+   const key = "dashboard:doctor"; json(join(f.home, "session_map.json"), { [key]: { cwd: f.project, provider: "acp" } });
   const binding = bindCrewSession(f.home, f.project, key); const session = `crew-${binding.keyHash}`;
-  const run = (env: NodeJS.ProcessEnv = {}) => {
-    const result = spawnSync(process.execPath, [join(f.project, ".kiro-crew/tools/aidlc.ts"), "--doctor", "--json", "--offline"], {
+  const run = (env: NodeJS.ProcessEnv = {}, preload?: string) => {
+    const result = spawnSync(process.execPath, [...(preload ? ["--preload", preload] : []), join(f.project, ".kiro-crew/tools/aidlc.ts"), "--doctor", "--json", "--offline"], {
       cwd: f.project, env: { ...f.env, ...env }, encoding: "utf8", timeout: remainingOperationTimeoutMs(NATIVE_FIXTURE_SETUP_TIMEOUT_MS), maxBuffer: 8 * 1024 * 1024,
     });
     expect(result.error).toBeUndefined();
@@ -76,8 +76,9 @@ function doctorFixture() {
 test("status and trust are read-only pending reports on an unconfigured project", () => {
   const f = fixture(); const before = f.owned();
   const status = f.run("status", ["--project-dir", f.project]);
-  expect(status.status).toBe(0); expect(status.report.rows).toHaveLength(6);
-  expect(status.report.rows.every(({ status }) => status === "pending")).toBe(true);
+  expect(status.status).toBe(0); expect(status.report.rows).toHaveLength(9);
+  expect(status.report.rows.filter(({ status }) => status === "pending")).toHaveLength(6);
+  expect(status.report.rows.filter(({ status }) => status !== "pending").every(({ status }) => status === "ok")).toBe(true);
   expect(f.run("trust").report.rows[0].status).toBe("pending"); expect(f.owned()).toEqual(before);
 });
 
@@ -250,9 +251,9 @@ test("same-version source drift and installed-source invocation cannot authorize
   expect(verifyRegisteredSpecs(f.home)).toHaveProperty("kirocrew");
 });
 
-test("doctor returns nine integration checks and never repairs an absent or ready installation", () => {
+test("doctor returns twelve integration checks and never repairs an absent or ready installation", () => {
   const f = doctorFixture(); const before = f.owned(); const ready = f.doctor();
-  expect(ready.checks).toHaveLength(9); expect(ready.checks.every(({ pass }) => pass)).toBe(true); expect(f.owned()).toEqual(before);
+  expect(ready.checks).toHaveLength(12); expect(ready.checks.every(({ pass }) => pass)).toBe(true); expect(f.owned()).toEqual(before);
   rmSync(join(f.paths.appRoot, ".aidlc-materialized.json")); const absent = f.owned(); const result = f.doctor();
   expect(result.status).toBe(1); expect(result.row("App installed+enabled").pass).toBe(false); expect(f.owned()).toEqual(absent);
 });
@@ -277,5 +278,157 @@ test("doctor warns about old children and unresolved or malformed dispatch state
   ]) {
     json(ledger, value); const before = f.owned(); const result = f.doctor();
     expect(result.row("Dispatch ledger health").severity).toBe("warn"); expect(f.owned()).toEqual(before);
+  }
+});
+
+function setupRow(report: SetupReport, name: string) {
+  const row = report.rows.find(({ what }) => what === name); expect(row).toBeDefined(); return row!;
+}
+function selectClaude(f: Fixture, global = "claude", member = "claude") {
+  const value = existsSync(f.config) ? JSON.parse(read(f.config)) : {};
+  json(f.config, { ...value, agent: { ...value.agent, acp_backend: global, member_acp_backend: member } });
+}
+
+test("setup and doctor resolve replacing backend axes without normalizing invalid selections", () => {
+  const f = doctorFixture(); const base = JSON.parse(read(f.config)); const local = join(f.home, "config.local.json");
+  for (const [axes, expected] of [
+    [{}, "ok"], [{ acp_backend: "claude" }, "warn"], [{ acp_backend: "kas" }, "warn"], [{ acp_backend: "codex" }, "warn"],
+    [{ acp_backend: "kiro-cli" }, "fail"], [{ acp_backend: "unknown" }, "fail"], [{ acp_backend: false }, "fail"], [{ member_acp_backend: null }, "fail"],
+  ] as const) {
+    json(f.config, { ...base, agent: { ...base.agent, ...axes } }); const before = f.owned();
+    const status = f.run("status", ["--project-dir", f.project]); expect(setupRow(status.report, "Backend selection").status).toBe(expected);
+    const doctor = f.doctor().row("Backend"); expect(doctor.pass).toBe(expected === "ok"); expect(doctor.severity === "warn").toBe(expected === "warn");
+    expect(f.owned()).toEqual(before);
+  }
+  selectClaude(f); json(local, { agent: { acp_backend: "", member_acp_backend: "kas" } }); const before = f.owned();
+  const row = setupRow(f.run("status", ["--project-dir", f.project]).report, "Backend selection"); expect(row.status).toBe("ok"); expect(row.detail).toContain("member_acp_backend=kas");
+  expect(f.doctor().row("Backend").pass).toBe(true); expect(f.owned()).toEqual(before);
+});
+
+function versionExecutables(f: Fixture, names: string[], output: string) {
+  const bin = join(f.root, "version-bin"); mkdirSync(bin);
+  const trace = join(f.root, "version-calls.jsonl");
+  for (const name of names) writeFileSync(join(bin, name), `#!${process.execPath}
+import {appendFileSync} from 'node:fs';
+const command=import.meta.path,args=process.argv.slice(2);
+appendFileSync(${JSON.stringify(trace)},JSON.stringify({command,args})+'\\n');
+if(args.length!==1||args[0]!=='--version')process.exit(97);
+if(process.env.FIXTURE_VERSION_FAILED==='1')process.exit(1);
+process.stdout.write(${output});
+`, { mode: 0o755 });
+  const calls = () => existsSync(trace) ? read(trace).trim().split("\n").map((line) => JSON.parse(line) as { command: string; args: string[] }) : [];
+  return { bin, trace, calls, env: { PATH: [bin, f.env.PATH].join(delimiter) } };
+}
+
+test("version observations use bounded argv and no-follow metadata without changing backend severity", () => {
+  const f = doctorFixture(); selectClaude(f);
+  const metadata = join(f.root, "kiro_crew"); mkdirSync(metadata); writeFileSync(join(metadata, "__init__.py"), '__version__ = "1.2.3"\n'); writeFileSync(join(metadata, "_build_info.py"), 'DISTRIBUTION = "test"\n');
+  const adapterDir = join(f.root, "adapter"); mkdirSync(adapterDir); const adapter = join(adapterDir, "claude-agent-acp"); writeFileSync(adapter, "#!/bin/sh\nexit 99\n"); chmodSync(adapter, 0o755);
+  const pkg = join(adapterDir, "package.json"); json(pkg, { name: "@agentclientprotocol/claude-agent-acp", version: "2.3.4" });
+  const host = versionExecutables(f, ["kirocrew", "claude", "node"], `command.endsWith('kirocrew')?${JSON.stringify(`kirocrew 9.9.9\n${metadata}\n`)}:'v3.4.5'`);
+  const env = { ...host.env, CLAUDE_AGENT_ACP_BIN: adapter }; const before = f.owned();
+  for (const detail of [setupRow(f.run("status", ["--project-dir", f.project], env).report, "Backend selection").detail, f.doctor(env).row("Backend").label]) {
+    expect(detail).toContain("Crew: 1.2.3; distribution: test"); expect(detail).toContain("package version: 2.3.4"); expect(detail).toContain("v3.4.5");
+  }
+  expect(host.calls().map((call) => call.command)).toEqual(["kirocrew", "claude", "node", "kirocrew", "claude", "node"].map((name) => join(host.bin, name)));
+  for (const call of host.calls()) expect(call.args).toEqual(["--version"]);
+  // Observe spawn options at the directly imported backend boundary; the CLI
+  // checks above exercise the real executables across the doctor's re-spawn.
+  const script = join(f.root, "version-options.ts");
+  writeFileSync(script, `import {mock} from 'bun:test';import * as cp from 'node:child_process';const calls=[],spawn=cp.spawnSync;
+mock.module('node:child_process',()=>({...cp,spawnSync:(command,args,options)=>{calls.push({command,args,timeout:options.timeout,maxBuffer:options.maxBuffer,shell:options.shell});return spawn(command,args,options);}}));
+const file=${JSON.stringify(join(portable, "setup/aidlc-kiro-crew-setup.ts"))};const {backend}=await import(file);backend(${JSON.stringify(f.home)});console.log(JSON.stringify(calls));`);
+  const bounded = spawnSync(process.execPath, [script], { env: { ...f.env, ...env }, encoding: "utf8", timeout: remainingOperationTimeoutMs(NATIVE_FIXTURE_SETUP_TIMEOUT_MS) });
+  expect(bounded.status, bounded.stderr).toBe(0);
+  const calls = JSON.parse(bounded.stdout); expect(calls).toHaveLength(3);
+  for (const call of calls) { expect(call.args).toEqual(["--version"]); expect(call.timeout).toBe(5000); expect(call.maxBuffer).toBe(64 * 1024); expect(call.shell).toBeUndefined(); expect(call.command).not.toBe(adapter); }
+  rmSync(pkg); symlinkSync(join(metadata, "__init__.py"), pkg);
+  const failedEnv = { ...env, FIXTURE_VERSION_FAILED: "1" };
+  const row = setupRow(f.run("status", ["--project-dir", f.project], failedEnv).report, "Backend selection");
+  expect(row.status).toBe("warn"); expect(row.detail).toContain("Crew: unknown"); expect(row.detail).toContain("package version: unknown");
+  expect(f.doctor(failedEnv).row("Backend").severity).toBe("warn"); expect(f.owned()).toEqual(before);
+});
+
+test("both collision reporters list every collision class in deterministic order without changing files", () => {
+  const f = doctorFixture(); selectClaude(f, "", "claude");
+  for (const [path, value] of [[".claude/settings.local.json", "{\"permissions\":{}}"], ["CLAUDE.md", "ambient"], [".claude/settings.json", "{}"], [".claude/hooks/local.json", "{}"], [".claude/tools/aidlc.ts", "engine"]]) {
+    mkdirSync(dirname(join(f.project, path)), { recursive: true }); writeFileSync(join(f.project, path), value);
+  }
+  const before = f.owned(); const status = f.run("status", ["--project-dir", f.project]); const doctor = f.doctor();
+  expect(status.status).toBe(1); expect(doctor.status).toBe(1); expect(doctor.row("Claude project collision").pass).toBe(false);
+  const row = setupRow(status.report, "Claude project collision"); expect(row.status).toBe("fail");
+  for (const text of [row.detail, doctor.row("Claude project collision").label]) {
+    const indexes = ["local-settings", "ambient-instructions", "project-settings", "project-integrations", "existing-engine"].map((id) => text.indexOf(id));
+    expect(indexes.every((value) => value >= 0)).toBe(true); expect(indexes).toEqual(indexes.toSorted((a, b) => a - b));
+  }
+  expect(f.owned()).toEqual(before);
+  selectClaude(f, "", "kas"); expect(setupRow(f.run("status", ["--project-dir", f.project]).report, "Claude project collision").status).toBe("ok");
+});
+
+test("unsafe project inspection refuses while seed and global existence only warn without reading global contents", () => {
+  const f = doctorFixture(); selectClaude(f);
+  const local = join(f.project, ".claude"); symlinkSync(f.home, local); const before = f.owned();
+  expect(setupRow(f.run("status", ["--project-dir", f.project]).report, "Claude project collision").status).toBe("fail"); expect(f.doctor().row("Claude project collision").pass).toBe(false); expect(f.owned()).toEqual(before);
+  rmSync(local); json(join(local, "settings.local.json"), { availableModels: ["model"] });
+  const global = join(f.root, ".claude"); mkdirSync(global); writeFileSync(join(global, "private.json"), "must not be read");
+  const preload = join(f.root, "global-read.ts"); const trace = join(f.root, "global-read-attempt");
+  writeFileSync(preload, `import {mock} from 'bun:test';import * as fs from 'node:fs';const open=fs.openSync,read=fs.readFileSync;const check=p=>{if(typeof p==='string'&&p.startsWith(${JSON.stringify(global)})){fs.writeFileSync(${JSON.stringify(trace)},p);throw new Error('global contents forbidden');}};mock.module('node:fs',()=>({...fs,openSync:(p,...args)=>{check(p);return open(p,...args)},readFileSync:(p,...args)=>{check(p);return read(p,...args)}}));`);
+  const seeded = f.owned(); const status = f.run("status", ["--project-dir", f.project], {}, preload);
+  const row = setupRow(status.report, "Claude project collision"); expect(row.status).toBe("warn"); expect(row.detail).toContain("availableModels-only"); expect(row.detail).toContain("contents not read");
+  expect(f.doctor({}, preload).row("Claude project collision").severity).toBe("warn"); expect(existsSync(trace)).toBe(false); expect(f.owned()).toEqual(seeded);
+});
+
+test("Claude project and bind collisions precede installer, root grants and binding writes", () => {
+  const f = fixture(); selectClaude(f); const key = "dashboard:collision"; json(join(f.home, "session_map.json"), { [key]: { provider: "claude_code" } });
+  writeFileSync(join(f.project, "CLAUDE.md"), "operator content"); const before = f.owned();
+  for (const [command, args] of [["project", projectArgs(f)], ["project", [...projectArgs(f), "--apply-local"]], ["bind", ["--project-dir", f.project, "--session-key", key]]] as [string, string[]][]) {
+    const result = f.run(command, args);
+    expect(result.status).toBe(1); expect(setupRow(result.report, "Claude project collision").status).toBe("fail"); expect(result.report.changed).toEqual([]); expect(f.owned()).toEqual(before);
+  }
+  expect(existsSync(join(f.project, ".kiro-crew"))).toBe(false); expect(existsSync(join(f.home, "apps/aidlc/data/bindings"))).toBe(false);
+});
+
+test("CLI child binding checks caller identity and effective roots while terminal recovery remains recorded-key only", () => {
+  const f = doctorFixture(); selectClaude(f); const child = "subagent:developer";
+  json(join(f.home, "session_map.json"), { [child]: { provider: "claude_code" }, [f.key]: { provider: "claude_code" } });
+  const args = ["--project-dir", f.project, "--session-key", child];
+  for (const identity of [f.key, "subagent:", "subagent:other", "bad\nkey"]) {
+    const before = f.owned(); expect(f.run("bind", args, { KIROCREW_SESSION_KEY: identity }).status).toBe(1); expect(f.owned()).toEqual(before);
+  }
+  const result = f.run("bind", args, { KIROCREW_SESSION_KEY: child }); expect(result.status, result.stdout).toBe(0);
+  const path = join(dirname(f.binding.path), `${createHash("sha256").update(child).digest("hex")}.json`); expect(JSON.parse(read(path)).source).toBe("project-dir");
+  const before = f.owned(); expect(f.run("bind", args, { KIROCREW_SESSION_KEY: child }).status).toBe(0); expect(f.owned()).toEqual(before);
+  json(join(f.home, "config.local.json"), { agent: { subagent_cwd_allowed_roots: [] } }); const replaced = f.owned();
+  expect(f.run("bind", args, { KIROCREW_SESSION_KEY: child }).status).toBe(1); expect(f.owned()).toEqual(replaced);
+  expect(f.run("bind", ["--project-dir", f.project, "--session-key", f.key]).status).toBe(0);
+});
+
+test("composition reports family counts and selected current identity without exposing raw keys or unknown labels", () => {
+  const f = doctorFixture(); const privateKey = "dashboard:private-key"; const privateProvider = "private-provider-label";
+  const cases = [
+    { axes: ["", "kas"], map: { [f.key]: { provider: "acp" }, [privateKey]: { provider: "kas" } }, status: "ok", fragment: "consistent Kiro" },
+    { axes: ["claude", "claude"], map: { [f.key]: { provider: "claude_code" } }, status: "warn", fragment: "with limitations" },
+    { axes: ["claude", "kas"], map: { [f.key]: { provider: "claude_code" } }, status: "warn", fragment: "mixed backend" },
+    { axes: ["", "kas"], map: { [f.key]: { provider: "claude_code" } }, status: "warn", fragment: "records-vs-config disagreement" },
+    { axes: ["", "kas"], map: { [privateKey]: { provider: privateProvider } }, status: "warn", fragment: "unrecognized (1)" },
+  ];
+  for (const item of cases) {
+    selectClaude(f, item.axes[0], item.axes[1]); json(join(f.home, "session_map.json"), item.map); const before = f.owned();
+    const env = { AIDLC_SESSION_OVERRIDE: f.session, KIROCREW_SESSION_KEY: privateKey };
+    const row = setupRow(f.run("status", ["--project-dir", f.project], env).report, "Crew composition"); const doctor = f.doctor(env).row("Crew composition");
+    expect(row.status).toBe(item.status); expect(doctor.severity === "warn").toBe(item.status === "warn");
+    for (const detail of [row.detail, doctor.label]) { expect(detail).toContain(item.fragment); expect(detail).not.toContain(privateKey); expect(detail).not.toContain(privateProvider); expect(detail).toContain("unrecorded children are not verified"); }
+    expect(f.owned()).toEqual(before);
+  }
+});
+
+test("whole-map composition limits admit 10000 records and warn on overflow, malformed and missing current records", () => {
+  const f = doctorFixture(); const path = join(f.home, "session_map.json");
+  const map = Object.fromEntries(Array.from({ length: 10000 }, (_, i) => [i === 0 ? f.key : `session:${i}`, { provider: "acp" }]));
+  const valid = JSON.stringify(map);
+  for (const [raw, status] of [[valid, "ok"], [valid.padEnd(4 * 1024 * 1024, " "), "ok"], [valid.padEnd(4 * 1024 * 1024 + 1, " "), "warn"], [JSON.stringify({ ...map, extra: {} }), "warn"], ["[]", "warn"], ["{", "warn"], ["{}", "warn"]]) {
+    writeFileSync(path, raw); const before = f.owned(); const env = { AIDLC_SESSION_OVERRIDE: f.session };
+    const row = setupRow(f.run("status", ["--project-dir", f.project], env).report, "Crew composition"); expect(row.status).toBe(status);
+    expect(f.doctor(env).row("Crew composition").severity === "warn").toBe(status === "warn"); expect(f.owned()).toEqual(before);
   }
 });

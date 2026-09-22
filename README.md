@@ -99,7 +99,7 @@ keeps the provider and model already selected by the user. `aidlc config
 providers` can apply Amazon Bedrock settings on supported project surfaces or
 record manual setup for other harnesses. Kiro CLI and Kiro IDE need no provider
 answer because model access comes with Kiro. The methodology itself is
-provider-independent. Crew owns backend/model access separately; follow its guide's setup and trust steps before starting work.
+provider-independent. Crew owns backend/model access separately; follow its setup and trust steps, plus the [Claude backend limits](docs/guide/harnesses/kiro-crew.md#claude-code-backend) when selected.
 
 ## Recommended Model
 

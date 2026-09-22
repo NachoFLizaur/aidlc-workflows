@@ -8,8 +8,8 @@ import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFi
 import { dirname, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
-import { classifyEngineBinding, crewHome, crewIdentityText, crewPidKey, isRecordedKey, projectPath, sessionHash } from "../setup/aidlc-kiro-crew-setup.ts";
-import { validateCrewStamp } from "../hooks/aidlc-kiro-crew-hook-entry.ts";
+import { classifyEngineBinding, crewHome, crewIdentityText, crewPidKey, crewSubagentProject, isRecordedKey, projectPath, sessionHash } from "../setup/aidlc-kiro-crew-setup.ts";
+import { boundCrewBackend, crewBackendFromRecords, validateCrewStamp, type CrewBackend } from "../hooks/aidlc-kiro-crew-hook-entry.ts";
 
 // Also embedded in the generated conductor prompt; one transport contract.
 export const CREW_ENGINE_TRANSPORT = `**Engine transport on Crew.** After the first \`aidlc_status\`, EVERY AIDLC engine operation the conductor performs, including shared \`aidlc …\` notation, direct helper scripts (\`aidlc-*.ts\` under \`.kiro-crew/tools/\`, invoked with Bun), and commands returned inside directives, goes through \`@aidlc:engine/aidlc_engine\` with raw argv (\`{"args":[…]}\`), never through the shell tool. Translate by this canonical contract, not prefix stripping alone:
@@ -38,8 +38,8 @@ const TOOLS = [
   },
   {
     name: "aidlc_bind_session",
-    description: "Bind this dashboard conversation to the selected project. Identity is auto-resolved from Crew's records. If unavailable, stop and report; an operator may bind from a terminal using the exact key shown in <home>/session_pid_<pid>.txt. An optional session_key must be Crew-recorded and must not conflict with resolved identity.",
-    inputSchema: { type: "object", properties: { session_key: { type: "string", minLength: 1 } }, additionalProperties: false },
+    description: "Bind this Crew conversation to the selected project. Identity is auto-resolved from Crew's records. If unavailable, stop and report; an operator may bind from a terminal using the exact key shown in <home>/session_pid_<pid>.txt. An optional session_key must be Crew-recorded and must not conflict with resolved identity. Subagent sessions only: optional project_dir selects the parent's absolute, stamped project from the delegation brief, inside Crew's effective subagent_cwd_allowed_roots. Conductors select by launch/session-map cwd, never project_dir.",
+    inputSchema: { type: "object", properties: { session_key: { type: "string", minLength: 1 }, project_dir: { type: "string", minLength: 1 } }, additionalProperties: false },
   },
 ];
 type RecordValue = Record<string, unknown>;
@@ -56,10 +56,11 @@ function rpcError(id: RpcId, code: number, message: string) {
 const mappedKey = crewPidKey;
 
 /** Re-read every call before binding/init: env key, host PID, scratch owner PID,
- * then immediate parent mapping. Warm wrappers can rekey between calls; no
+ * then immediate parent mapping. Any scratch directory with .owner is accepted;
+ * Claude may publish a Node runtime PID without HOST_PID. Warm runtimes can rekey; no
  * process walk or stable-key assumption. Missing identity retries next call,
  * never guesses or bypasses. Local routing is not authentication; a shared
- * wrapper PID cannot distinguish simultaneous conversations. */
+ * runtime PID cannot distinguish simultaneous conversations. */
 export function resolveCrewSessionKey(home: string): string | undefined {
   const envKey = process.env.KIROCREW_SESSION_KEY;
   if (envKey?.trim() && !/[\0\r\n]/.test(envKey)) return envKey;
@@ -83,7 +84,7 @@ export function resolveCrewSessionKey(home: string): string | undefined {
 let explicitSessionKey: string | undefined;
 const BIND_HELP = `Cannot bind Crew session: identity is unavailable from Crew's records.
 Paths: <home>/session_pid_<pid>.txt; <app>/setup/aidlc-kiro-crew-setup.ts; <absolute-project>.
-Records: aidlc_bind_session accepts only a Crew-recorded key matching the hook's parent_session_key, never a native kiro-cli UUID.
+Records: aidlc_bind_session accepts only Crew-published identity, never a backend-native UUID. Conductor keys match the hook's parent_session_key; child MCP keys are distinct from that parent key.
 Next steps:
 1. Stop and report; never construct a key.
 2. An operator may bind from a terminal using the exact key shown in <home>/session_pid_<pid>.txt: bun <app>/setup/aidlc-kiro-crew-setup.ts bind --session-key <raw-key> --project-dir <absolute-project> --crew-home <home>.`;
@@ -110,7 +111,7 @@ Next steps:
   return resolved ?? explicit;
 }
 type Context = { home: string; directProject?: string };
-type Source = "binding" | "session-map" | "launch-cwd" | "direct-launch";
+type Source = "binding" | "session-map" | "launch-cwd" | "direct-launch" | "project-dir";
 type Selection = { project: string; source: Source; path: string; before?: string; data?: RecordValue };
 const PROJECT_HELP = "Select the project in the dashboard, run project setup, or use aidlc_bind_session after selecting a set-up project.";
 const REBIND_HELP = "Next steps:\n1. Rebind explicitly with bun <app>/setup/aidlc-kiro-crew-setup.ts bind --session-key <raw-key> --project-dir <absolute-project> --crew-home <crew-home>.\n2. Then retry aidlc_bind_session.";
@@ -157,9 +158,12 @@ function stampedProject(value: unknown): string {
 /** Select after current identity, before writes: own binding, own session-map
  * cwd, then stamped launch cwd. Legacy string/empty cwd is absent; corrupt maps
  * or invalid present cwd refuse. Binding/map disagreement requires explicit
- * operator setup bind. No search, project switch or bypass. Local routing does
- * not grant Crew trust/cwd permissions. */
-function selectProject(context: Context, key: string): Selection {
+ * operator setup bind. A subagent-only project_dir validates stamp/effective roots
+ * before writes and on reuse; it ignores the child's distinct cwd but never
+ * switches an existing binding. No search or bypass. Local routing does not
+ * grant Crew trust/cwd permissions. */
+function selectProject(context: Context, key: string, projectDir?: string): Selection {
+  const requested = projectDir === undefined ? undefined : crewSubagentProject(context.home, projectDir, key);
   const hash = sessionHash(key);
   const path = join(context.home, "apps/aidlc/data/bindings", `${hash}.json`);
   let before: string | undefined;
@@ -177,6 +181,11 @@ function selectProject(context: Context, key: string): Selection {
 Paths: ${path}
 Records: present binding is invalid or unreadable.
 ${REBIND_HELP}`); }
+  if (requested !== undefined || data?.source === "project-dir") {
+    const project = requested ?? crewSubagentProject(context.home, bound!, key);
+    if (bound && bound !== project) throw new Error(`project_dir conflicts with the existing Crew project binding; no automatic project switch.\nPaths: ${path}\n${REBIND_HELP}`);
+    return { project, source: "project-dir", path, before, data: data ? { ...data, source: "project-dir" } : undefined };
+  }
   let cwd: unknown;
   try {
     const text = routingText(join(context.home, "session_map.json"));
@@ -229,7 +238,7 @@ function writeBinding(selection: Selection, key: string) {
   stampedProject(project);
   const keyHash = sessionHash(key);
   const changed = before === undefined;
-  const after = data && typeof data.source === "string" ? before! : `${JSON.stringify(data ? { ...data, source } : { projectDir: project, boundAt: new Date().toISOString(), source }, null, 2)}\n`;
+  const after = data && typeof data.source === "string" && (source !== "project-dir" || JSON.parse(before!).source === "project-dir") ? before! : `${JSON.stringify(data ? { ...data, source } : { projectDir: project, boundAt: new Date().toISOString(), source }, null, 2)}\n`;
   if (after !== before) {
     mkdirSync(dirname(path), { recursive: true });
     const tmp = `${path}.${randomUUID()}.tmp`;
@@ -251,7 +260,7 @@ function engineContext(context: Context, project: string, key: string) {
   const entry = join(project, ".kiro-crew/tools/aidlc.ts");
   try { if (!statSync(entry).isFile()) throw new Error("not a file"); }
   catch { throw new Error(`MCP bridge requires bun + project engine: missing ${entry}; native aidlc alone is not supported. Run project setup.`); }
-  const env: NodeJS.ProcessEnv = { ...process.env, AIDLC_PROJECT_DIR: project, AIDLC_SESSION_OVERRIDE: `crew-${sessionHash(key)}`, AIDLC_HARNESS_DIR: ".kiro-crew", AIDLC_HARNESS_NAME: "kiro-crew", KIROCREW_HOME: context.home };
+  const env: NodeJS.ProcessEnv = { ...process.env, AIDLC_PROJECT_DIR: project, AIDLC_SESSION_OVERRIDE: `crew-${sessionHash(key)}`, AIDLC_CREW_BACKEND: boundCrewBackend(context.home, project, key), AIDLC_HARNESS_DIR: ".kiro-crew", AIDLC_HARNESS_NAME: "kiro-crew", KIROCREW_HOME: context.home };
   delete env.AIDLC_SESSION_OVERRIDE_SOURCE;
   delete env.AIDLC_COMPILED_EXECUTABLE;
   return { entry, env };
@@ -262,8 +271,8 @@ function engineContext(context: Context, project: string, key: string) {
  * refuse without repair/bypass. AgentSpawn is runtime allocation, not reset.
  * Verify durable initialization after advisory spawn, never trust exit 0 alone.
  * Calls serialize locally; concurrent initializers remain possible. */
-async function bindAndInitialize(context: Context, key: string) {
-  const selection = selectProject(context, key);
+async function bindAndInitialize(context: Context, key: string, projectDir?: string) {
+  const selection = selectProject(context, key, projectDir);
   const project = selection.project;
   engineContext(context, project, key);
   const session = `crew-${sessionHash(key)}`;
@@ -291,14 +300,45 @@ async function bindAndInitialize(context: Context, key: string) {
     });
     if (!initialized()) throw new Error(`Core session-start did not create ${path}; repair the project engine and retry.`);
   }
-  return binding;
+  return { ...binding, ...publishBackend(context, project, key) };
 }
+
+/** Read the own-key provider after validated initialization and again after
+ * engine work, which can replace binding fields. Preserve space/intent/time and
+ * extras. Missing records publish unknown; disagreeing known observations set
+ * sticky backendConflict, retained across core rewrites within this call. Only
+ * operator repair clears it. No config/title/process fallback or bypass. Corrupt
+ * bindings refuse, never repair. Snapshot recheck before rename is not a lock. */
+function publishBackend(context: Context, project: string, key: string, prior?: { backend: CrewBackend; backendConflict?: true }): { backend: CrewBackend; backendConflict?: true } {
+  const session = `crew-${sessionHash(key)}`;
+  const path = join(project, "aidlc/.aidlc-sessions", `${session}.binding.json`);
+  const before = routingText(path);
+  const state = classifyEngineBinding(project, session);
+  if (state.state !== "valid" || before === undefined) throw new Error(state.state === "corrupt" ? state.reason : `Missing engine session binding ${path}; no backend publication.`);
+  const data = JSON.parse(before) as RecordValue;
+  const observed = crewBackendFromRecords(context.home, key);
+  const previous = Object.hasOwn(data, "backend") ? data.backend : prior?.backend;
+  const conflict = data.backendConflict !== undefined || prior?.backendConflict === true ||
+    (previous !== undefined && previous !== "unknown" && (previous !== "kiro" && previous !== "claude" || observed !== "unknown" && previous !== observed));
+  const observation = { backend: conflict ? "unknown" as const : observed, ...(conflict ? { backendConflict: true as const } : {}) };
+  if (data.backend === observation.backend && data.backendConflict === observation.backendConflict) return observation;
+  const tmp = `${path}.${randomUUID()}.tmp`;
+  try {
+    writeFileSync(tmp, `${JSON.stringify({ ...data, ...observation }, null, 2)}\n`, { flag: "wx", mode: statSync(path).mode & 0o777 });
+    if (routingText(path) !== before) throw new Error(`Engine session binding changed during backend publication: ${path}; retry with other writers stopped.`);
+    renameSync(tmp, path);
+  } finally { rmSync(tmp, { force: true }); }
+  return observation;
+}
+
 async function runEngine(context: Context, args: string[]) {
   let binding: Awaited<ReturnType<typeof bindAndInitialize>>;
   let execution: ReturnType<typeof engineContext>;
+  let key: string;
   try {
-    const key = sessionKey(context.home);
-    if (!key) return toolError(BIND_HELP);
+    const resolved = sessionKey(context.home);
+    if (!resolved) return toolError(BIND_HELP);
+    key = resolved;
     binding = await bindAndInitialize(context, key);
     execution = engineContext(context, binding.projectDir, key);
   }
@@ -312,6 +352,11 @@ async function runEngine(context: Context, args: string[]) {
       maxBuffer: 4 * 1024 * 1024,
     }, (error, stdout, stderr) => {
       if (stderr) process.stderr.write(stderr);
+      try { publishBackend(context, binding.projectDir, key, binding); }
+      catch (publicationError) {
+        resolve(toolError(`Cannot bind Crew session: backend publication after engine execution failed: ${publicationError instanceof Error ? publicationError.message : String(publicationError)}`));
+        return;
+      }
       resolve({
         content: [{ type: "text", text: stdout || (error ? stderr || error.message : "") }],
         isError: error !== null,
@@ -323,19 +368,19 @@ async function runEngine(context: Context, args: string[]) {
 /** Validate tool schema and entry allowlist before execution. Invalid argv and
  * project overrides return isError without spawning; no bypass. Admitted engine
  * operations are not sandboxed. Timeout/output overflow is a tool error, never
- * a success receipt. */
+ * a success receipt. Only the separate subagent bind selector admits project_dir. */
 async function callTool(context: Context, params: unknown) {
   if (!record(params)) return toolError("tools/call requires a tool name and arguments object.");
   const input = params.arguments ?? {};
   if (!record(input)) return toolError("Tool arguments must be an object.");
   if (params.name === "aidlc_bind_session") {
-    if (Object.keys(input).some((key) => key !== "session_key") || (input.session_key !== undefined && (typeof input.session_key !== "string" || !input.session_key.trim() || input.session_key.includes("\0")))) {
-      return toolError("Cannot bind Crew session: aidlc_bind_session accepts only an optional non-empty session_key string without NUL.\nPaths: selected Crew home.\nRecords: session_key must be Crew-recorded.\nNext steps:\n1. Stop and report invalid input; never construct a key.");
+    if (Object.keys(input).some((key) => key !== "session_key" && key !== "project_dir") || [input.session_key, input.project_dir].some((value) => value !== undefined && (typeof value !== "string" || !value.trim() || value.includes("\0")))) {
+      return toolError("Cannot bind Crew session: aidlc_bind_session accepts only optional non-empty session_key and project_dir strings without NUL.\nPaths: selected Crew home.\nRecords: session_key must be Crew-recorded; project_dir is subagent-only.\nNext steps:\n1. Stop and report invalid input; never construct a key.");
     }
     try {
       const key = sessionKey(context.home, input.session_key as string | undefined);
       if (!key) return toolError(BIND_HELP);
-      const binding = await bindAndInitialize(context, key);
+      const binding = await bindAndInitialize(context, key, input.project_dir as string | undefined);
       if (input.session_key !== undefined) explicitSessionKey = key;
       return { content: [{ type: "text", text: JSON.stringify(binding) }], isError: false };
     } catch (error) { return toolError(`Cannot bind Crew session: ${error instanceof Error ? error.message : String(error)}`); }

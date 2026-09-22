@@ -26,13 +26,20 @@
  * Detection is not permission enforcement. Sensors, graph rebuild, state sync,
  * session-end, compact, subagent-stop, statusline, usage and rule delivery are not
  * registered here. AgentSpawn context is advisory, not rule delivery.
+ *
+ * The entry pins a corroborated parent-key backend per call, never from titles
+ * or configuration. Unknown/conflicting pins refuse guarded Pre and drop Post
+ * rows. Child hooks observe the parent backend, not independent child identity.
+ * Claude uses its own title grammar and correlated Bash ARTIFACT receipts below;
+ * file-tool writes have no success Post. Native Task/Agent refusal cannot block
+ * notification paths, and pre-approved reads bypass permission requests.
  */
 import { createHash, randomUUID } from "node:crypto";
-import { accessSync, closeSync, constants, existsSync, fstatSync, lstatSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { activeSummaryAuthorizationForRecordPath, assertNoSymlinkInChainOrThrow, auditFilePath, codekbDir, hookChildEnv, loadStageGraphAll, recordDir, sanitizeHarnessPlainText } from "../tools/aidlc-lib.ts";
+import { activeSummaryAuthorizationForRecordPath, assertNoSymlinkInChainOrThrow, auditFilePath, codekbDir, hookChildEnv, loadStageGraphAll, recordDir, runWithOwnerStampedLock, sanitizeHarnessPlainText, writeFileAtomic } from "../tools/aidlc-lib.ts";
 
 const HOOKS_DIR = dirname(fileURLToPath(import.meta.url));
 const EVENTS = new Set(["AgentSpawn", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]);
@@ -54,6 +61,12 @@ const object = (value: unknown): value is JsonObject =>
 const text = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
 const timestamp = (value: unknown): boolean => text(value) && Number.isFinite(Date.parse(value));
 const note = (message: string): void => { process.stderr.write(`AI-DLC Kiro Crew: ${message}\n`); };
+
+// Read per call; direct launches without a valid entry pin stay unknown.
+export function resolveBackend(): "kiro" | "claude" | "unknown" {
+  const resolvedBackend = process.env.AIDLC_CREW_BACKEND;
+  return resolvedBackend === "kiro" || resolvedBackend === "claude" ? resolvedBackend : "unknown";
+}
 
 export function crewSessionId(parentSessionKey: string): string {
   if (!text(parentSessionKey) || parentSessionKey.includes("\0")) throw new Error("missing or malformed parent_session_key; bind the dashboard session with aidlc_bind_session");
@@ -128,7 +141,7 @@ const READ_KEYS = new Set([...FILE_KEYS, "mode", "start_line", "end_line", "star
 const READ_MODES = new Set(["Line", "Directory", "Search"]);
 const GUARDS = ["aidlc-state-transition-guard.ts", "aidlc-plan-approval-guard.ts", "aidlc-review-freeze.ts"];
 type ToolCall = { tool: string; input: JsonObject };
-type Classification = { kind: "core"; calls: ToolCall[] } | { kind: "advisory" } | { kind: "read" };
+type Classification = { kind: "core"; calls: ToolCall[]; receiptCommand?: string } | { kind: "advisory" } | { kind: "read" } | { kind: "refuse"; reason: string };
 function malformed(): never { throw new Error("malformed guarded tool input"); }
 class CoreRefusal extends Error {}
 
@@ -205,8 +218,8 @@ function classifyMcp(tool: string, input: JsonObject | undefined, project: strin
   if (input) {
     const keys = Object.keys(input);
     if (tool === "mcp__aidlc:engine__aidlc_status" && keys.length === 0) return { kind: "read" };
-    if (tool === "mcp__aidlc:engine__aidlc_bind_session" && keys.every((key) => key === "session_key") &&
-      (!("session_key" in input) || (text(input.session_key) && !input.session_key.includes("\0")))) return { kind: "read" };
+    if (tool === "mcp__aidlc:engine__aidlc_bind_session" && keys.every((key) => key === "session_key" || key === "project_dir") &&
+      keys.every((key) => text(input[key]) && !(input[key] as string).includes("\0"))) return { kind: "read" };
     if (tool === "mcp__kirocrew-core__ask_question" && (
       (keys.length === 1 && Array.isArray(input.questions) && input.questions.length > 0 &&
         input.questions.every((question) => object(question) && text(question.question))) ||
@@ -274,6 +287,33 @@ function reviewerCanInspect(classification: Classification, rawInput: unknown): 
   });
 }
 
+/** Claude title/shape classification precedes core calls. MCP precedes shell;
+ * titles never supply targets. Unknown object inputs stay conservative and the
+ * reviewer veto still applies. No bypass or host-path authentication claim. */
+function classifyClaudeTool(payload: JsonObject, project: string): Classification {
+  if (!text(payload.tool_name)) malformed();
+  const title = payload.tool_name;
+  const input = object(payload.tool_input) ? Object.fromEntries(Object.entries(payload.tool_input).filter(([key]) => key !== "__tool_use_purpose")) : undefined;
+  const mcp = mcpName(title);
+  if (mcp) return classifyMcp(mcp.replace(/^mcp__aidlc_engine__/, "mcp__aidlc:engine__"), input, project);
+  if (title === "Task" || title === "Agent") return { kind: "refuse", reason: "native Task/Agent delegation is unsupported; use Crew dispatch (notification-path denial is advisory)" };
+  if (/^Read(?:\s|$)/.test(title)) {
+    if (!input || !FILE_KEYS.some((key) => key in input)) return { kind: "advisory" };
+    return { kind: "core", calls: fileCalls("Read", input, project) };
+  }
+  const writer = /^(Write|Edit)(?:\s|$)/.exec(title)?.[1];
+  if (writer || title === "Preparing file…") {
+    if (!input) return { kind: "advisory" };
+    return { kind: "core", calls: fileCalls(writer ?? "Write", input, project) };
+  }
+  // Share structural validation without using Kiro display-title recognition.
+  if (input && FILE_KEYS.some((key) => key in input)) return { kind: "core", calls: fileCalls("", input, project) };
+  if (input && text(input.command)) return { kind: "core", calls: [{ tool: "Bash", input }], receiptCommand: input.command };
+  if (title === "Terminal" || title === "Bash") malformed();
+  if (!input) return { kind: "advisory" };
+  return { kind: "core", calls: [{ tool: title, input }] };
+}
+
 /** Read outstanding children before Stop. Corruption allows turn end with a
  * diagnostic rather than a potentially duplicate dispatch nudge. No expiry or
  * auto-removal applies; the conductor must reconcile terminal outcomes. */
@@ -310,6 +350,14 @@ function postWrite(payload: JsonObject, project: string): ToolCall {
   const match = create ?? replace;
   const raw = match?.[0] === output ? match[1] : undefined;
   if (!raw) throw new Error("unsupported success output (only create/replace; insert/append unsupported)");
+  const file = checkedWritePath(raw, project);
+  return { tool: create ? "Write" : "Edit", input: { file_path: file } };
+}
+
+/** Shared boundary/authorization oracle, read before emission without widening
+ * either grammar. Unsafe files and invalid/stale timestamps drop the row. Null
+ * authorization skips only its time floor; no disabling flag or shared lock. */
+function checkedWritePath(raw: string, project: string): string {
   if (!isAbsolute(raw) || resolve(raw) !== raw) throw new Error("success path must be absolute and normalized");
   const file = assertNoSymlinkInChainOrThrow(realpathSync(project), relative(project, raw));
   if (realpathSync(file) !== file || !lstatSync(file).isFile()) throw new Error("success path must resolve to an existing regular non-symlink file");
@@ -325,10 +373,184 @@ function postWrite(payload: JsonObject, project: string): ToolCall {
       if (!Number.isFinite(floor) || !Number.isFinite(mtime) || mtime < floor) throw new Error("file freshness failed: invalid timestamp or mtime below summary authorization recorded_at floor");
     }
   }
-  return { tool: create ? "Write" : "Edit", input: { file_path: file } };
+  return file;
+}
+
+type ReceiptRequest = { path: string; atMs: number; commandHash: string };
+const RECEIPT_WINDOW_MS = 2000;
+const RECEIPT_TTL_MS = 10 * 60 * 1000;
+const MAX_RECEIPT_PATHS = 256;
+
+/** Local receipt ledger: <crew-home>/apps/aidlc/data/receipts/<session-hash>.jsonl.
+ * Only conductor structured Bash commands passing every core guard append paths;
+ * atMs is arrival before guard I/O. Literal ARTIFACT commands and in-boundary,
+ * no-symlink paths are required; heredoc bodies never grant receipt authority.
+ * No shell expansion/execution or title inference occurs. Unsupported spellings
+ * miss rows; pre-approved Bash without a request cannot produce an audit row.
+ *
+ * The owner-stamped lock serializes read/append/consume. Reads prune entries older
+ * than 10 minutes before matching/cap decisions, persisting expiry even on later
+ * refusal. Byte-identical commands coalesce within an inclusive fixed 2,000-ms
+ * window, retaining earliest arrival. Newest prior matching path wins, consumed
+ * before core emission. Failure Posts consume all preceding requests: unrelated
+ * failures can miss rows. Future arrivals and child Posts are excluded.
+ *
+ * Corrupt/unsafe records, contention and more than 256 paths refuse Pre or drop
+ * Post rows; no repair or bypass. Appends/rewrites use 0600, new directories 0700.
+ * A lost core emission stays consumed, but a replay can match an older pending
+ * request. Identical concurrent commands can misattribute a fresh in-boundary
+ * write. This is detection only, not a grant or a shared core-authorization lock. */
+function receiptLedger<T>(session: string, action: (entries: ReceiptRequest[], path: string) => T): T {
+  const home = process.env.KIROCREW_HOME || join(process.env.HOME || homedir(), ".kiro", "crew");
+  if (!isAbsolute(home)) throw new Error("receipt ledger requires an absolute Crew home");
+  const directory = assertNoSymlinkInChainOrThrow(realpathSync(home), "apps/aidlc/data/receipts");
+  mkdirSync(directory, { recursive: true, mode: 0o700 });
+  const path = join(directory, `${session.slice(5)}.jsonl`);
+  const result = runWithOwnerStampedLock(`${path}.lock`, 20, 10, () => {
+    let entries: ReceiptRequest[] = [];
+    try {
+      const fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+      try {
+        const stat = fstatSync(fd);
+        if (!stat.isFile() || stat.size > 1024 * 1024) throw new Error("invalid receipt ledger file or size");
+        const raw = readFileSync(fd, "utf8");
+        entries = raw === "" ? [] : raw.trimEnd().split("\n").map((line) => JSON.parse(line));
+      } finally { closeSync(fd); }
+    } catch (error) { if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error; }
+    if (!entries.every((entry) => object(entry) &&
+      text(entry.path) && isAbsolute(entry.path) && !/[\0\r\n]/.test(entry.path) && resolve(entry.path) === entry.path &&
+      Number.isSafeInteger(entry.atMs) && entry.atMs > 0 && typeof entry.commandHash === "string" && /^[a-f0-9]{64}$/.test(entry.commandHash))) {
+      throw new Error("invalid receipt ledger entries; no automatic repair");
+    }
+    const now = Date.now();
+    const pending = entries.filter((entry) => now - entry.atMs <= RECEIPT_TTL_MS);
+    if (pending.length !== entries.length) rewriteReceiptLedger(path, pending);
+    entries = pending;
+    if (entries.length > MAX_RECEIPT_PATHS) throw receiptLedgerFull(path);
+    return action(entries, path);
+  });
+  if (!result.acquired) throw new Error("receipt ledger lock contended; retry the operation");
+  return result.value;
+}
+
+/** Restore 0600 under the ledger lock after atomic replacement, before returning
+ * to admission. Replacement temporarily uses umask-derived permissions; existing
+ * directory permissions remain operator-owned. Failure refuses Pre/drops Post;
+ * no bypass. The shared atomic writer has no mode argument. */
+function rewriteReceiptLedger(path: string, entries: ReceiptRequest[]): void {
+  writeFileAtomic(path, entries.map((entry) => `${JSON.stringify(entry)}\n`).join(""));
+  chmodSync(path, 0o600);
+}
+
+function receiptLedgerFull(path: string): Error {
+  return new Error(`receipt ledger full (256 pending); entries expire after 10 min; remove \`${path}\` to reset (operator action)`);
+}
+
+// Mask queued literal heredoc bodies as the state-transition guard does.
+// Unsupported delimiters discard the command instead of guessing body boundaries.
+function receiptCommandText(command: string): string {
+  const pending: { delimiter: string; stripTabs: boolean }[] = [];
+  const lines: string[] = [];
+  for (const line of command.split("\n")) {
+    if (pending.length) {
+      if ((pending[0].stripTabs ? line.replace(/^\t+/, "") : line) === pending[0].delimiter) pending.shift();
+      continue;
+    }
+    const heredoc = /(?<!<)<<(-)?[ \t]*(?:'([^']+)'|"([^"]+)"|\\?([A-Za-z_][A-Za-z0-9_]*))(?=[ \t;&|<>)]|$)/g;
+    const withoutDelimiters = line.replace(heredoc, (_match, tabs, single, double, bare) => {
+      pending.push({ delimiter: single ?? double ?? bare, stripTabs: tabs === "-" });
+      return "";
+    });
+    if (withoutDelimiters.includes("<<")) return "";
+    lines.push(withoutDelimiters);
+  }
+  return pending.length ? "" : lines.join("\n");
+}
+
+function rememberReceiptRequest(project: string, session: string, command: string, atMs: number, env: Record<string, string | undefined>): void {
+  if (command.includes("\0")) malformed();
+  const commandText = receiptCommandText(command);
+  if (!commandText.includes("ARTIFACT ")) return;
+  const pins = ["AIDLC_PROJECT_DIR", "CLAUDE_PROJECT_DIR", "AIDLC_HARNESS_DIR", "AIDLC_HARNESS_NAME", "AIDLC_SESSION_OVERRIDE", "AIDLC_SESSION_OVERRIDE_SOURCE"];
+  const prior = pins.map((key) => process.env[key]);
+  let record: string | null;
+  let codekb: string;
+  try {
+    for (const key of pins) { if (env[key] === undefined) delete process.env[key]; else process.env[key] = env[key]; }
+    record = recordDir(project);
+    codekb = dirname(codekbDir(project, "_"));
+  } finally {
+    for (const [index, key] of pins.entries()) { if (prior[index] === undefined) delete process.env[key]; else process.env[key] = prior[index]; }
+  }
+  const paths = new Set<string>();
+  for (const match of commandText.matchAll(/(?:^|[\s=<>|;&(])(?:"(\/[^"\0\r\n]+)"|'(\/[^'\0\r\n]+)'|(\/[^\s"'`$<>|;&()\\]+))/g)) {
+    const path = match[1] ?? match[2] ?? match[3];
+    if (resolve(path) !== path || !((record !== null && path.startsWith(`${record}/`)) || path.startsWith(`${codekb}/`))) continue;
+    try { paths.add(assertNoSymlinkInChainOrThrow(realpathSync(project), relative(project, path))); }
+    catch { /* Unsafe paths supply no receipt authority. */ }
+  }
+  if (!paths.size) return;
+  const commandHash = createHash("sha256").update(command, "utf8").digest("hex");
+  receiptLedger(session, (entries, path) => {
+    const duplicate = entries.find((entry) => entry.commandHash === commandHash && Math.abs(atMs - entry.atMs) <= RECEIPT_WINDOW_MS);
+    if (duplicate) {
+      if (atMs < duplicate.atMs) rewriteReceiptLedger(path, entries.map((entry) =>
+        entry.commandHash === commandHash && entry.atMs === duplicate.atMs ? { ...entry, atMs } : entry));
+      return; // Guard completion can reorder arrivals; retain the earliest floor.
+    }
+    if (entries.length + paths.size > MAX_RECEIPT_PATHS) throw receiptLedgerFull(path);
+    const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | constants.O_NOFOLLOW | constants.O_NONBLOCK, 0o600);
+    try {
+      if (!fstatSync(fd).isFile()) throw new Error("receipt ledger is not a regular file");
+      appendFileSync(fd, [...paths].map((path) => JSON.stringify({ path, atMs, commandHash })).join("\n") + "\n");
+    } finally { closeSync(fd); }
+  });
+}
+
+/** Admit only unnamed conductor Post with one console fence and exactly one
+ * final-line ARTIFACT. Require the newest same-session prior request and file
+ * mtime >= request arrival; consume before core emission, never from Pre alone.
+ * Before title/receipt admission, a single bare/console fence beginning with
+ * Exit code or User refused permission consumes preceding requests as failed.
+ * Output shape is not authenticated failure identity; unrelated failures can
+ * miss rows. Every other failure drops the row; no bypass or self-attestation. */
+function claudePostWrite(payload: JsonObject, project: string, session: string, postAtMs: number): ToolCall {
+  if (payload.subagent_id || (payload.agent_role !== undefined && !["aidlc", "aidlc-crew"].includes(String(payload.agent_role)))) {
+    throw new Error("conductor-session payload required; child write provenance is not supported");
+  }
+  const output = object(payload.tool_response) ? payload.tool_response.output : undefined;
+  const fenced = typeof output === "string" ? /^```(?:console)?\n([\s\S]*)\n```$/.exec(output) : null;
+  const firstLine = fenced?.[1].split("\n")[0] ?? "";
+  if (fenced && !fenced[1].split("\n").some((line) => line.startsWith("```")) &&
+    (/^Exit code \d+/.test(firstLine) || /^User refused permission to run tool(?:$|[ \t.:])/.test(firstLine))) {
+    receiptLedger(session, (entries, path) => {
+      const remaining = entries.filter((entry) => entry.atMs > postAtMs);
+      if (remaining.length !== entries.length) rewriteReceiptLedger(path, remaining);
+    });
+    throw new Error("Claude failure/rejection Post: prior requests consumed-failed; no write receipt");
+  }
+  if (Object.hasOwn(payload, "tool_name")) throw new Error("Claude titled Post is not a receipt (file-tool write provenance is not supported)");
+  if (typeof output !== "string" || !output.startsWith("```console\n") || !output.endsWith("\n```")) throw new Error("unsupported Claude receipt output");
+  const body = output.slice("```console\n".length, -"\n```".length);
+  const lines = body.split("\n");
+  const raw = /^ARTIFACT (\/[^\n]+)$/.exec(lines.at(-1) ?? "")?.[1];
+  if (!raw || /[\0\r]/.test(raw) || lines.some((line) => line.startsWith("```")) || lines.filter((line) => line.startsWith("ARTIFACT ")).length !== 1) {
+    throw new Error("unsupported Claude receipt: exactly one ARTIFACT on the last fenced body line required");
+  }
+  return receiptLedger(session, (entries, path) => {
+    const entry = entries.filter((entry) => entry.path === raw && entry.atMs <= postAtMs)
+      .reduce<ReceiptRequest | undefined>((newest, candidate) => !newest || candidate.atMs >= newest.atMs ? candidate : newest, undefined);
+    if (!entry) throw new Error("receipt requires a prior unconsumed permission request");
+    const file = checkedWritePath(raw, project);
+    const mtime = statSync(file).mtimeMs;
+    if (!Number.isFinite(mtime) || mtime < entry.atMs) throw new Error("receipt freshness failed: mtime below permission request atMs");
+    rewriteReceiptLedger(path, entries.filter((other) => other !== entry));
+    return { tool: "Write", input: { file_path: file } };
+  });
 }
 
 export async function run(target: string, input: string, _extraArgs: string[] = []): Promise<number> {
+  const arrivedAtMs = Date.now();
   let event = target || process.env.KIROCREW_HOOK_EVENT || "";
   let payload: JsonObject;
   try {
@@ -354,6 +576,7 @@ export async function run(target: string, input: string, _extraArgs: string[] = 
     if (project === undefined) return 0;
     const binding = classifyEngineBinding(project, session);
     if (binding.state === "corrupt") throw new Error(binding.reason);
+    const resolvedBackend = resolveBackend();
     if (event === "UserPromptSubmit") {
       const prompt = typeof payload.prompt === "string" ? payload.prompt : process.env.KIROCREW_HOOK_CONTEXT || "";
       if (!text(prompt) || payload.subagent_id || payload.stop_hook_active === true ||
@@ -399,7 +622,8 @@ export async function run(target: string, input: string, _extraArgs: string[] = 
       const prior = pins.map((key) => process.env[key]);
       try {
         for (const key of pins) { if (env[key] === undefined) delete process.env[key]; else process.env[key] = env[key]; }
-        const call = postWrite(payload, project);
+        if (resolvedBackend === "unknown") throw new Error("unknown or conflicting backend observation; no grammar selected");
+        const call = resolvedBackend === "claude" ? claudePostWrite(payload, project, session, arrivedAtMs) : postWrite(payload, project);
         if (!existsSync(auditFilePath(project))) note("PostToolUse advisory: audit shard missing; core will drop the write row");
         core("aidlc-write-audit-log.ts", { hook_event_name: event, tool_name: call.tool, tool_input: call.input });
       } catch (error) {
@@ -431,13 +655,15 @@ export async function run(target: string, input: string, _extraArgs: string[] = 
       // Missing required guards deny before any fidelity-based exemption.
       for (const hook of hooks) accessSync(process.env.AIDLC_COMPILED_EXECUTABLE || join(HOOKS_DIR, hook), constants.R_OK);
       guarded = true;
+      if (resolvedBackend === "unknown") throw new Error(reviewer ? "reviewer-scope veto: unresolved backend cannot be inspected" : "unknown or conflicting backend observation; guarded tool refused");
       let classified: Classification;
-      try { classified = classifyTool(payload, project); }
+      try { classified = resolvedBackend === "claude" ? classifyClaudeTool(payload, project) : classifyTool(payload, project); }
       catch (error) {
         if (reviewer) throw new Error("reviewer-scope veto: tool input cannot be inspected");
         throw error;
       }
       if (reviewer && (mcpName(String(payload.tool_name)) || !reviewerCanInspect(classified, payload.tool_input))) throw new Error("reviewer-scope veto: tool input cannot be inspected");
+      if (classified.kind === "refuse") throw new Error(classified.reason);
       if (classified.kind === "read") return 0;
       if (classified.kind === "advisory") {
         const title = sanitizeHarnessPlainText(String(payload.tool_name)).replace(/\s+/g, " ").slice(0, 360);
@@ -448,6 +674,9 @@ export async function run(target: string, input: string, _extraArgs: string[] = 
         hook_event_name: event, tool_name: tool, tool_input: normalized,
         ...(reviewer ? { agent_type: reviewer } : payload.subagent_id && text(payload.agent_role) ? { agent_type: payload.agent_role } : {}),
       });
+      if (classified.receiptCommand && !payload.subagent_id && (payload.agent_role === undefined || ["aidlc", "aidlc-crew"].includes(String(payload.agent_role)))) {
+        rememberReceiptRequest(project, session, classified.receiptCommand, arrivedAtMs, env);
+      }
     } else if (event === "Stop") {
       if (awaitingChildren(project, session)) {
         note("awaiting dispatched children; legitimate turn end, no Stop block");

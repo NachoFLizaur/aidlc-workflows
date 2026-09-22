@@ -25,17 +25,25 @@ export function requireLive(): void {
     throw new Error("Crew registration requires explicit live opt-in without a no-LLM veto");
   }
 }
-function prerequisites(): string {
+/** Read the selector before lookup or scratch allocation. Only Kiro and Claude
+ * can register this journey; invalid values throw, never fall back. Selection
+ * affects only the newly allocated home and cannot bypass live vetoes. */
+export function registrationBackend(env: NodeJS.ProcessEnv = process.env): "kiro" | "claude" {
+  const backend = env.AIDLC_KIRO_CREW_BACKEND ?? "kiro";
+  if (backend !== "kiro" && backend !== "claude") throw new Error("Crew registration backend must be kiro or claude");
+  return backend;
+}
+function prerequisites() {
   requireLive();
-  if ((process.env.AIDLC_KIRO_CREW_BACKEND ?? "kiro") !== "kiro") throw new Error("Crew registration supports the kiro backend");
+  const backend = registrationBackend();
   const crew = Bun.which("kirocrew");
   if (!crew || !Bun.which("bun")) throw new Error("Crew registration requires kirocrew and Bun on PATH");
   if (!existsSync(join(APP, "app.json")) || !existsSync(join(RUNTIME, ".kiro-crew/tools/aidlc.ts"))) {
     throw new Error("Crew registration requires the packaged App Kit and project runtime");
   }
-  return crew;
+  return { crew, backend };
 }
-function createCrewScratch() {
+function createCrewScratch(backend: "kiro" | "claude") {
   requireLive();
   const root = createTestProject();
   removeWorkspaceRecord(root);
@@ -51,14 +59,14 @@ function createCrewScratch() {
   };
   for (const path of [home, project]) mkdirSync(path, { recursive: true });
   // Crew encodes the default Kiro CLI backend as an empty acp_backend value.
-  writeFileSync(join(home, "config.json"), JSON.stringify({ agent: { acp_backend: "" } }));
+  writeFileSync(join(home, "config.json"), JSON.stringify({ agent: { acp_backend: backend === "kiro" ? "" : "claude", member_acp_backend: backend === "kiro" ? "kas" : "claude" } }));
   const run = (command: string, args: string[]) => {
     requireLive();
     const result = spawnSync(command, args, { cwd: project, env, encoding: "utf8", timeout: remainingOperationTimeoutMs(NATIVE_FIXTURE_SETUP_TIMEOUT_MS), maxBuffer: 8 * 1024 * 1024 });
     if (result.error || result.status !== 0) throw new Error(`${command}: ${result.error?.message ?? result.stderr}`);
     return result.stdout;
   };
-  return { root, home, project, env, run };
+  return { root, home, project, env, run, backend };
 }
 export type Registration = ReturnType<typeof createCrewScratch>;
 
@@ -76,8 +84,8 @@ function grantScratchApp(f: Registration): void {
   writeFileSync(path, JSON.stringify(config));
 }
 export function createRegistration(): Registration {
-  const crew = prerequisites();
-  const f = createCrewScratch();
+  const { crew, backend } = prerequisites();
+  const f = createCrewScratch(backend);
   try {
     f.run(process.execPath, [join(APP, "setup/aidlc-kiro-crew-setup.ts"), "project", "--project-dir", f.project, "--runtime-root", RUNTIME, "--crew-home", f.home]);
     grantScratchApp(f);

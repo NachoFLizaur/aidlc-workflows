@@ -2,10 +2,11 @@
 // subcommand:aidlc-log:link, subcommand:aidlc-state:unit
 import { afterEach, expect, test, setDefaultTimeout } from "bun:test";
 import { spawnSync } from "node:child_process";
-import { cpSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import { dirname, join, relative } from "node:path";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+import { basename, dirname, join, relative } from "node:path";
 import { appendAuditEntry } from "../../core/tools/aidlc-audit.ts";
-import { auditBlockField, currentPipelineLinkReceipts, readAuditShardEvents, reviewRecordDigest, unitCompletedReceipts } from "../../dist/kiro-crew/.kiro-crew/tools/aidlc-lib.ts";
+import { auditBlockField, currentPipelineLinkReceipts, readAuditShardEvents, reviewRecordDigest, sessionPidMapDir, unitCompletedReceipts, writeSessionBinding } from "../../dist/kiro-crew/.kiro-crew/tools/aidlc-lib.ts";
+import { sessionHash } from "../../harness/kiro-crew/setup/aidlc-kiro-crew-setup.ts";
 import type { RunStageDirective } from "../../core/tools/aidlc-directive.ts";
 import { cleanupTestProject, createTestProject, REPO_ROOT, runOrchestrateNext, seedBoltDag, seededRecordDir, seededStateFile, seedStateFile, withEnvAndFreshCaches } from "../harness/fixtures.ts";
 import { testGuardEnvironment } from "../harness/runner-profile.ts";
@@ -167,4 +168,131 @@ test("paired per-unit reviews and explicit unit receipts release only the depend
   expect(f.next().wave?.entries.map(({ unit }) => unit)).toEqual(["dependent"]);
   expect(f.rows("UNIT_COMPLETED")).toHaveLength(2);
   expect(existsSync(join(f.record, "construction/dependent/functional-design/functional-spec.md"))).toBe(false);
+});
+
+/** Crew's gateway, not the conductor, owns child processes. Publish input only
+ * after the intermediate launcher exits: detached alone still has the worker in
+ * its ancestry. The detached host waits for that input before any bridge/engine
+ * call. Missing launch/result fails within the operation budget, with no direct
+ * spawn fallback or session-guard bypass; unfinished process groups are killed. */
+function detachedBridgeCall(bridge: string, home: string, cwd: string, env: NodeJS.ProcessEnv, input: string): ReturnType<Fixture["run"]> {
+  const dir = mkdtempSync(join(home, "bridge-call-")); const request = join(dir, "request"); const response = join(dir, "response");
+  const timeout = remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS)!; const deadline = Date.now() + timeout;
+  const host = `
+    import { spawnSync } from "node:child_process";
+    import { existsSync, readFileSync, renameSync, writeFileSync } from "node:fs";
+    const request = ${JSON.stringify(request)}, response = ${JSON.stringify(response)}, deadline = ${deadline};
+    while (!existsSync(request)) { if (Date.now() >= deadline) process.exit(1); Bun.sleepSync(10); }
+    const result = spawnSync(process.execPath, ${JSON.stringify([bridge, "mcp", "--crew-home", home])}, {
+      encoding: "utf8", input: readFileSync(request, "utf8"), timeout: Math.max(1, deadline - Date.now()), killSignal: "SIGKILL",
+    });
+    writeFileSync(response + ".tmp", JSON.stringify(result)); renameSync(response + ".tmp", response);
+  `;
+  const launcher = spawnSync(process.execPath, ["-e", `
+    import { spawn } from "node:child_process";
+    const child = spawn(process.execPath, ["-e", ${JSON.stringify(host)}], { detached: true, stdio: "ignore" });
+    child.on("error", (error) => { throw error; }); child.unref(); console.log(child.pid);
+  `], { cwd, env, encoding: "utf8", timeout });
+  const pid = Number(launcher.stdout.trim());
+  let finished = false;
+  try {
+    expect(launcher.status, launcher.stderr).toBe(0);
+    expect(Number.isSafeInteger(pid) && pid > 1).toBe(true);
+    writeFileSync(`${request}.tmp`, input); // Request publication is the launch-exit barrier.
+    // The host must not read a partially written JSON-RPC request.
+    renameSync(`${request}.tmp`, request);
+    while (!existsSync(response) && Date.now() < deadline) Bun.sleepSync(10);
+    expect(existsSync(response), "Detached bridge did not return within its operation budget").toBe(true);
+    const result: ReturnType<Fixture["run"]> = JSON.parse(readFileSync(response, "utf8"));
+    finished = result.status !== null;
+    return result;
+  } finally {
+    if (!finished && Number.isSafeInteger(pid) && pid > 1) {
+      try { process.kill(process.platform === "win32" ? pid : -pid, "SIGKILL"); }
+      catch (error) { if ((error as NodeJS.ErrnoException).code !== "ESRCH") console.error("Detached bridge cleanup failed:", error); }
+    }
+  }
+}
+
+function claudeChild(f: Fixture, role: string): Fixture & { home: string } {
+  const home = createTestProject(); projects.push(home); const cwd = join(f.project, `child-${role}`); mkdirSync(cwd, { recursive: true });
+  const key = `subagent:${role}`; const session = `crew-${sessionHash(key)}`;
+  write(join(home, "config.json"), JSON.stringify({ agent: { acp_backend: "claude", member_acp_backend: "claude", subagent_cwd_allowed_roots: [f.project] } }));
+  write(join(home, "session_map.json"), JSON.stringify({ [key]: { provider: "claude_code", cwd }, "dashboard:protocol": { provider: "claude_code", cwd: f.project } }));
+  const env = { ...f.env, HOME: home, KIROCREW_HOME: home, KIROCREW_SESSION_KEY: key, AIDLC_SESSION_OVERRIDE: undefined };
+  const bridge = join(REPO_ROOT, "dist/kiro-crew/kiro-crew-app/mcp/aidlc-mcp-bridge.ts");
+  const call = (name: string, args: unknown) => {
+    const result = detachedBridgeCall(bridge, home, cwd, env, `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: { name, arguments: args } })}\n`);
+    expect(result.status, result.stderr).toBe(0);
+    const response = JSON.parse(result.stdout); expect(response.error).toBeUndefined();
+    return { ...result, status: response.result.isError ? 1 : 0, stdout: response.result.content[0].text as string };
+  };
+  const bound = call("aidlc_bind_session", { project_dir: f.project }); expect(bound.status, bound.stdout).toBe(0);
+  expect(JSON.parse(bound.stdout)).toMatchObject({ backend: "claude", source: "project-dir", keyHash: sessionHash(key) });
+  expect(existsSync(join(sessionPidMapDir(f.project), String(process.pid)))).toBe(false);
+  writeSessionBinding(f.project, session, "default", basename(f.record));
+  const run: Fixture["run"] = (tool, args) => call("aidlc_engine", { args: ["engine", tool, ...args] });
+  const ok: Fixture["ok"] = (tool, args) => { const result = run(tool, args); expect(result.status, result.stdout + result.stderr).toBe(0); return result.stdout; };
+  return { ...f, home, session, run, ok };
+}
+
+test("Claude composer grids are validated through the child bind before human approval can be recorded", () => {
+  const f = fixture(); const parent = "dashboard:protocol"; f.session = `crew-${sessionHash(parent)}`; f.env.AIDLC_SESSION_OVERRIDE = f.session;
+  f.env.AIDLC_SKIP_HUMAN_PRESENCE_GUARD = "0"; writeSessionBinding(f.project, f.session, "default", basename(f.record));
+  const child = claudeChild(f, "composer"); const proposal = join(f.project, "proposal.json"); const before = readFileSync(seededStateFile(f.project));
+  writeFileSync(proposal, JSON.stringify({ stages: { nonexistent: "EXECUTE" } }));
+  const invalid = child.run("graph", ["validate-grid", "--proposal", proposal, "--strict"]); expect(JSON.parse(invalid.stdout).valid).toBe(false);
+  const scopes = JSON.parse(readFileSync(join(f.tools, "data/scope-grid.json"), "utf8")); writeFileSync(proposal, JSON.stringify({ stages: scopes.bugfix.stages }));
+  expect(JSON.parse(child.ok("graph", ["validate-grid", "--proposal", proposal, "--project-type", "greenfield"])).valid).toBe(true);
+  const settle = f.dispatch("compose", "aidlc-crew-composer-agent"); settle();
+  f.ok("log", ["decision", "--stage", "requirements-analysis", "--decision", "Accept this proposed grid?", "--options", "Approve,Reject"]);
+  const answer = () => f.run("log", ["answer", "--stage", "requirements-analysis", "--details", "Approve"]);
+  const prompt = (text: string) => spawnSync(process.execPath, [join(f.project, ".kiro-crew/hooks/aidlc-kiro-crew-adapter.ts"), "UserPromptSubmit"], { cwd: f.project, env: { ...f.env, AIDLC_CREW_BACKEND: "claude", HOME: child.home, KIROCREW_HOME: child.home }, encoding: "utf8", input: JSON.stringify({ hook_event_name: "UserPromptSubmit", parent_session_key: parent, prompt: text }), timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS) });
+  expect(prompt("[Subagent completion event] Approve").status).toBe(0); expect(answer().status).not.toBe(0); expect(f.rows("QUESTION_ANSWERED")).toEqual([]);
+  expect(prompt("Approve").status).toBe(0); const approved = answer(); expect(approved.status, approved.stdout + approved.stderr).toBe(0);
+  expect(f.rows("QUESTION_ANSWERED")).toHaveLength(1); expect(f.rows("RECOMPOSED")).toEqual([]); expect(readFileSync(seededStateFile(f.project))).toEqual(before);
+});
+
+test("Claude reviewer completion and rework pair new engine requests without treating child settlement as approval", () => {
+  const f = fixture(); const artifact = requirements(f); const child = claudeChild(f, "product-lead");
+  const first = review(child); f.dispatch("requirements-analysis", "aidlc-crew-product-lead-agent")();
+  expect(f.rows("REVIEW_COMPLETED")).toEqual([]); expect(f.run("state", ["gate-start", "requirements-analysis"]).status).not.toBe(0);
+  const result = first.finish(); expect(result.status, result.stdout).toBe(0); const saved = join(f.record, JSON.parse(result.stdout).reviewRecord); const bytes = readFileSync(saved);
+  f.ok("state", ["gate-start", "requirements-analysis"]); f.ok("state", ["reject", "requirements-analysis", "--feedback", "Specify the default greeting"]);
+  writeFileSync(artifact, "# Requirements\n\nDefault greeting is hello.\n");
+  const context = child.ok("review-brief", ["context", "--stage", "requirements-analysis"]); expect(context).toContain("requirements.md");
+  const second = review(child); expect(second.requestId).not.toBe(first.requestId);
+  const continued = JSON.parse(f.ok("crew-dispatch", ["continue", "--child", "first", "--run", "rework"])); expect(continued.conversationId).toBe("first");
+  f.ok("crew-dispatch", ["settle", "--child", "rework", "--outcome", "completed"]); expect(f.rows("REVIEW_COMPLETED")).toHaveLength(1);
+  const finished = second.finish(); expect(finished.status, finished.stdout).toBe(0);
+  expect(f.rows("REVIEW_COMPLETED").map(({ block }) => auditBlockField(block, "Request Id"))).toEqual([first.requestId, second.requestId]);
+  expect(readFileSync(saved)).toEqual(bytes); expect(JSON.parse(finished.stdout).reviewRecord).not.toBe(JSON.parse(result.stdout).reviewRecord);
+});
+
+test("Claude child pipeline settlement cannot replace artifact-backed ordered link receipts", () => {
+  const f = fixture(); seedStateFile(f.project, "state-brownfield-init-done.md"); const child = claudeChild(f, "developer"); const stage = "reverse-engineering";
+  withEnvAndFreshCaches({ ...f.env, AIDLC_ALLOW_DIRECT_AUDIT_EVENTS: "1" }, () => appendAuditEntry("STAGE_STARTED", { Stage: stage, Agent: "aidlc-developer-agent" }, f.project));
+  const receipts = () => withEnvAndFreshCaches(f.env, () => currentPipelineLinkReceipts(f.project, stage).map(({ link }) => link));
+  f.dispatch(stage, "aidlc-crew-developer-agent")(); expect(receipts()).toEqual([]);
+  const artifact = join(f.record, "inception/reverse-engineering/developer-scan.md");
+  expect(child.run("log", ["link", "--stage", stage, "--link", "aidlc-developer-agent", "--artifact", relative(f.project, artifact)]).status).not.toBe(0); expect(receipts()).toEqual([]);
+  write(artifact, "## Developer Code Scan Results\n\n### Scan Coverage\n\n- src/\n\n## Handoff Summary\n\nGreeting implementation.\n");
+  child.ok("log", ["link", "--stage", stage, "--link", "aidlc-developer-agent", "--artifact", relative(f.project, artifact)]); expect(receipts()).toEqual(["aidlc-developer-agent"]);
+  child.ok("log", ["link", "--stage", stage, "--link", "aidlc-architect-agent"]); expect(receipts()).toEqual(["aidlc-developer-agent", "aidlc-architect-agent"]);
+});
+
+test("Claude unit child writes only its paired receipt and cannot release an unfinished sibling", () => {
+  const f = waveFixture(); const child = claudeChild(f, "architect"); const first = f.next();
+  const alpha = first.wave!.entries.find(({ unit }) => unit === "alpha")!;
+  const intended = JSON.parse(f.ok("crew-dispatch", ["intend", "--wave", "design", "--stage", first.stage, "--task", "alpha", "--role", "aidlc-crew-architect-agent"]));
+  f.ok("crew-dispatch", ["confirm", "--intent", intended.intentId, "--child", "alpha-child"]);
+  f.ok("crew-dispatch", ["settle", "--child", "alpha-child", "--outcome", "failed"]);
+  expect(child.run("state", ["unit", "complete", "--wave", "--stage", first.stage, "--unit", "alpha"]).status).not.toBe(0);
+  expect(f.next().wave!.entries.map(({ unit }) => unit)).toEqual(["alpha", "beta"]);
+  for (const path of alpha.required_produces) write(join(f.project, path), "# Alpha design\n\nGreeting implementation.\n");
+  const request = review(child, first.stage, "alpha"); const reviewed = request.finish(); expect(reviewed.status, reviewed.stdout).toBe(0);
+  expect(withEnvAndFreshCaches(f.env, () => unitCompletedReceipts(f.project, first.stage).size)).toBe(0);
+  expect(child.ok("state", ["unit", "complete", "--wave", "--stage", first.stage, "--unit", "alpha"])).toContain("UNIT_COMPLETED");
+  expect(f.next().wave!.entries.map(({ unit }) => unit)).toEqual(["beta"]); expect(f.rows("UNIT_COMPLETED")).toHaveLength(1);
+  expect(withEnvAndFreshCaches(f.env, () => [...unitCompletedReceipts(f.project, first.stage).keys()])).toEqual(["alpha"]);
 });

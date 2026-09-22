@@ -4061,7 +4061,7 @@ export async function collectDoctorReport(
   } else if (harness === ".kiro-crew") {
     /** Read-only preflight: stamp, PATH, replacing config, receipt/inventory,
      * registered commands, binding identity and dispatch schema are read before
-     * conductor startup. No host calls or repair writes. Absent prerequisites,
+     * conductor startup. Only bounded version calls, no repair writes. Absent prerequisites,
      * corrupt receipts, drift and unsafe commands fail; partial state warns.
      * Fail exits 1; warning-only exits 0, but both hold conductor startup until
      * repaired/reconciled. No ceremony bypass. These snapshots do not prove live
@@ -4124,6 +4124,125 @@ export async function collectDoctorReport(
       local = agent(join(crewHome, "config.local.json"));
       effective = { ...base, ...local };
     } catch (error) { configError = errorMessage(error); }
+    /** Independent setup twin: read effective axes before reporting, never switch
+     * backends. Unknown selections fail; known limitations warn. Version commands
+     * and no-follow metadata reads are informational, never admission. No shell,
+     * adapter launch, install or bypass; session PATH may differ from the gateway. */
+    const backendSupport = {
+      "kiro-cli": "Kiro CLI backend",
+      claude: "limited support: conductor and distinct-directory child sessions; file-tool write provenance, native delegation denial and running-child steering are not supported; see guide §Claude backend",
+      kas: "not supported by this integration",
+      codex: "not supported by this integration",
+    };
+    const axis = (value: unknown, fallback: string) => {
+      const selected = value === undefined ? fallback : value;
+      const name = selected === "" ? "kiro-cli" : selected;
+      const known = selected === "" || selected === "claude" || selected === "kas" || selected === "codex";
+      return { name: known ? name as keyof typeof backendSupport : "unrecognized" as const,
+        detail: known ? `${name} — ${backendSupport[name as keyof typeof backendSupport]}` : `unrecognized (${JSON.stringify(selected)})` };
+    };
+    const global = axis(effective.acp_backend, "");
+    const member = axis(effective.member_acp_backend, "kas");
+    const version = (bin: string | null) => {
+      if (!bin) return "unknown";
+      try {
+        const r = spawnSync(bin, ["--version"], { encoding: "utf8", timeout: 5_000, maxBuffer: 64 * 1024,
+          env: { ...process.env, KIROCREW_HOME: crewHome, KIRO_HOME: join(crewHome, "kiro") } });
+        return !r.error && r.status === 0 ? r.stdout.trim() || "unknown" : "unknown";
+      } catch { return "unknown"; }
+    };
+    const tupleFs = await import("node:fs");
+    const tupleText = (path: string) => {
+      const fd = tupleFs.openSync(path, tupleFs.constants.O_RDONLY | tupleFs.constants.O_NOFOLLOW | tupleFs.constants.O_NONBLOCK);
+      try {
+        const stat = tupleFs.fstatSync(fd); const limit = 64 * 1024;
+        if (!stat.isFile() || stat.size > limit) throw new Error("invalid tuple metadata");
+        const buffer = Buffer.alloc(limit + 1); const size = tupleFs.readSync(fd, buffer, 0, buffer.length, 0);
+        if (size > limit) throw new Error("oversize tuple metadata");
+        return new TextDecoder("utf-8", { fatal: true, ignoreBOM: true }).decode(buffer.subarray(0, size));
+      } finally { tupleFs.closeSync(fd); }
+    };
+    const crewOutput = version(Bun.which("kirocrew"));
+    let crewVersion = /^kirocrew\s+([\w.+-]+)\s*$/m.exec(crewOutput)?.[1] ?? "unknown";
+    let distribution = "unknown";
+    const packagePath = /(?:^|\s)(\/[^\r\n]*?\/kiro_crew)(?:\/(?:__init__|cli)\.py)?["'):]?(?:\r?$|\s)/m.exec(crewOutput)?.[1];
+    if (packagePath) {
+      try { crewVersion = /^__version__\s*=\s*["']([^"'\r\n]+)["']/m.exec(tupleText(join(packagePath, "__init__.py")))?.[1] ?? crewVersion; } catch { /* Unknown source version. */ }
+      try { distribution = /^DISTRIBUTION\s*=\s*["']([^"'\r\n]+)["']/m.exec(tupleText(join(packagePath, "_build_info.py")))?.[1] ?? "unknown"; } catch { /* Never infer distribution from version. */ }
+    }
+    const observations = [`Crew: ${crewVersion}; distribution: ${distribution} (version observation only; does not establish backend compatibility)`];
+    if (global.name === "claude" || member.name === "claude") {
+      const override = process.env.CLAUDE_AGENT_ACP_BIN;
+      const adapter = Bun.which(override || "claude-agent-acp");
+      let adapterVersion = "unknown";
+      if (adapter) try {
+        const dir = dirname(realpathSync(adapter));
+        for (const root of [dir, dirname(dir)]) {
+          try {
+            const pkg = JSON.parse(tupleText(join(root, "package.json")));
+            if (pkg.name === "@agentclientprotocol/claude-agent-acp" && typeof pkg.version === "string") { adapterVersion = pkg.version; break; }
+          } catch { /* No install or launch to discover package metadata. */ }
+        }
+      } catch { /* Resolution raced; version remains unknown. */ }
+      const cli = Bun.which("claude"); const node = Bun.which("node");
+      const oneLine = (s: string) => s.replace(/[\r\n\t]/g, " ").slice(0, 512);
+      observations.push(`Claude adapter: ${adapter || "not found (Crew resolver step 6 would fail)"}; source: ${override ? "CLAUDE_AGENT_ACP_BIN" : "PATH"}; package version: ${oneLine(adapterVersion)}`,
+        `Claude CLI: ${oneLine(version(cli))}${cli ? ` (${cli})` : " (not found on PATH)"}`,
+        `Node: ${oneLine(version(node))}${node ? ` (${node})` : " (not found on PATH)"}; first node on PATH (shebang resolver); Crew's augmented PATH may differ`);
+    }
+    row(configError || global.name === "unrecognized" || member.name === "unrecognized" ? "fail" : global.name === "kiro-cli" ? "ok" : "warn", "Backend",
+      `${configError ? `cannot read effective Crew config: ${configError}` : `agent.acp_backend=${global.detail}; agent.member_acp_backend=${member.detail} (member-DM only; not delegated-child selection)`}\n  Observations (informational): ${observations.join("\n    ")}`);
+    /** Collision twin: inspect before reporting, never mutate Claude files. Only
+     * ENOENT is absent; unsafe/unreadable paths fail. availableModels-only seeds
+     * warn without proving ownership. Global ~/.claude is lstat-only. Fail exits
+     * 1; warnings exit 0 but hold conductor startup. Disabled only when neither
+     * axis is Claude; no bypass. This snapshot is not a direct MCP/live-hook lock. */
+    const collisionHelp = "Missing or invalid project stamps are checked by the bridge: Cannot bind Crew session: Invalid or mismatched stamp. Setup never modifies Claude files.";
+    const collisionRemediation = "Remediation: move or remove these files (operator action; setup never modifies them), or use a clean project. Not a Kiro CLI concern.";
+    if (configError) row("fail", "Claude project collision", "cannot read effective Crew config; collision check incomplete", collisionHelp);
+    else if (global.name !== "claude" && member.name !== "claude") row("ok", "Claude project collision", global.name === "kiro-cli" ? "not applicable (backend kiro-cli)" : "not applicable");
+    else {
+      const classes: string[] = []; const reasons: string[] = []; const paths: string[] = []; const warnings: string[] = [];
+      const present = (path: string) => {
+        try { return tupleFs.lstatSync(path); } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined; throw error; }
+      };
+      const found = (id: string, reason: string, files: string[]) => {
+        if (files.length) { classes.push(id); reasons.push(`${reason} (${id})`); paths.push(...files); }
+      };
+      let inspection = "";
+      try {
+        const claude = present(join(projectDir, ".claude"));
+        if (claude && !claude.isDirectory()) throw new Error(".claude is not a regular directory (symlink or other entry); not followed");
+        const local = ".claude/settings.local.json";
+        if (present(join(projectDir, local))) {
+          let seed = false;
+          try { const value: unknown = JSON.parse(tupleText(join(projectDir, local))); seed = isPlainObject(value) && Object.keys(value).every((key) => key === "availableModels"); } catch { /* Unverifiable seeds refuse without repair. */ }
+          if (seed) warnings.push("Crew seed present (transient; live session?) — .claude/settings.local.json matches the availableModels-only shape; ownership is not proven. Close the live session and recheck; setup never modifies it.");
+          else found("local-settings", "Crew withholds its MCP servers when the project already has Claude settings", [local]);
+        }
+        found("ambient-instructions", "ambient CLAUDE.md instructions coexist with the conductor prompt; unsupported combination", ["CLAUDE.md", ".claude/CLAUDE.md"].filter((file) => present(join(projectDir, file))));
+        found("project-settings", "existing Claude Code configuration", present(join(projectDir, ".claude/settings.json")) ? [".claude/settings.json"] : []);
+        found("project-integrations", "existing Claude Code configuration", [".claude/hooks", ".claude/agents", ".claude/skills"].filter((file) => {
+          const entry = present(join(projectDir, file));
+          return entry && (!entry.isDirectory() || readdirSync(join(projectDir, file)).length > 0);
+        }));
+        const harness = present(join(projectDir, ".claude/tools/aidlc.ts")) ? [".claude/tools/aidlc.ts"] : [];
+        if (present(join(projectDir, ".claude/CLAUDE.md"))) {
+          try {
+            const text = tupleText(join(projectDir, ".claude/CLAUDE.md"));
+            if (text.includes("This project uses AI-DLC (AI-Driven Development Life Cycle)") || /^@\.claude\/rules\/aidlc\.md\s*$/m.test(text)) harness.push(".claude/CLAUDE.md");
+          } catch { /* Ambient instructions already refuse even without a readable marker. */ }
+        }
+        found("existing-engine", "existing AIDLC Claude Code harness — two engines", harness);
+      } catch { inspection = "Project Claude configuration could not be safely inspected; collision check incomplete."; }
+      try { if (present(join(home, ".claude"))) warnings.push("~/.claude exists — ambient user-level Claude settings/plugins load into every session; not isolated by KIROCREW_HOME (existence only; contents not read)."); }
+      catch { warnings.push("~/.claude existence could not be checked; ambient user-level Claude configuration is unverified (contents not read)."); }
+      const failed = classes.length > 0 || !!inspection;
+      const detail = failed
+        ? `Claude project collision: ${classes.join(", ") || "inspection incomplete"} — ${[...reasons, inspection].filter(Boolean).join(" / ")}${paths.length ? `. Files: ${[...new Set(paths)].join(", ")}.` : ""} ${collisionRemediation}`
+        : warnings.length ? "Claude project collision: none refusing." : "no ambient project Claude configuration detected";
+      row(failed ? "fail" : warnings.length ? "warn" : "ok", "Claude project collision", [detail, ...warnings].join(" "), collisionHelp);
+    }
     const roots = effective.subagent_cwd_allowed_roots ?? [];
     const validRoots = Array.isArray(roots) && roots.every((root) => typeof root === "string");
     const authorized = !configError && project && validRoots && roots.some((root: string) => {
@@ -4354,6 +4473,50 @@ export async function collectDoctorReport(
       : bound ? override ? "current session binding targets this project and matches a Crew session record (local routing only)" : "at least one binding targets this project and matches a Crew session record; current dashboard slot is not verified by doctor"
       : "not bound — the conductor's first aidlc_status call binds, or run setup bind",
       `${corruptBindings.length ? "Preserve and inspect the named binding(s); rebind the affected raw session key. " : ""}${bindFix}`);
+    /** Composition twin: reuse resolved axes and bounded no-follow identity reads
+     * before reporting. Whole-map limits are 4 MiB/10,000 entries. Unknown labels
+     * collapse without exposing keys; current identity is override/env only.
+     * Mixed, missing-current or invalid observations warn, never establish child
+     * inheritance or live-process identity. No writes or bypass; warnings hold
+     * conductor preflight even though their CLI exit is 0. */
+    const composition = () => {
+      const selection = { global: configError ? "unrecognized" : global.name, member: configError ? "unrecognized" : member.name };
+      const family = (name: string) => name === "kiro-cli" || name === "kas" ? "kiro-family" : name;
+      const providerFamily = (label: string) => label === "acp" || label === "kiro" || label === "kas" ? "kiro-family" : label === "claude_code" ? "claude" : label === "codex" ? "codex" : "unrecognized";
+      const current = process.env.AIDLC_SESSION_OVERRIDE || (process.env.KIROCREW_SESSION_KEY ? `crew-${hash(process.env.KIROCREW_SESSION_KEY)}` : undefined);
+      const counts = new Map<string, number>(); const families = new Set<string>();
+      let entries = 0; let mapIssue = ""; let currentLabel: string | undefined;
+      try {
+        const map: unknown = JSON.parse(identityText(join(crewHome, "session_map.json"), 4 * 1024 * 1024));
+        if (!isPlainObject(map)) throw new Error("invalid map");
+        const records = Object.entries(map);
+        if (records.length > 10_000) throw new Error("entry limit");
+        entries = records.length;
+        for (const [key, record] of records) {
+          const raw = isPlainObject(record) && typeof record.provider === "string" ? record.provider : "";
+          const kind = providerFamily(raw); const label = kind === "unrecognized" ? "unrecognized" : raw;
+          counts.set(label, (counts.get(label) ?? 0) + 1); families.add(kind);
+          if (current === `crew-${hash(key)}`) currentLabel = label;
+        }
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code !== "ENOENT") mapIssue = "session_map.json unreadable, malformed or over limits (4 MiB / 10000 entries); composition unverified";
+      }
+      const providers = counts.size ? `{${[...counts].sort(([a], [b]) => a.localeCompare(b)).map(([label, count]) => `${label} (${count})`).join(", ")}}` : "{}";
+      const observed = `observed providers: ${providers}`;
+      const recordNote = mapIssue || (entries ? `${entries} session records observed (labels only; not live process verification)` : "no session records observed; classification from config only");
+      const currentNote = !current ? "current session not selected" : currentLabel ? `current session provider: ${currentLabel}` : "current session provider unverified (no matching map entry; no parent-backend inference)";
+      const notes = `${observed}; ${recordNote}; ${currentNote}; unrecorded children are not verified`;
+      const reasons: string[] = [];
+      const known = selection.global !== "unrecognized" && selection.member !== "unrecognized";
+      if (known && family(selection.global) !== family(selection.member)) reasons.push(`member-DM selection is a separate axis (member_acp_backend=${selection.member}, agent.acp_backend=${selection.global}); member-DM sessions can dispatch children on ${selection.global}`);
+      if (selection.global !== "unrecognized" && [...families].some((kind) => kind !== "unrecognized" && kind !== family(selection.global))) reasons.push(`records-vs-config disagreement: agent.acp_backend=${selection.global}, recorded backends=${[...families].sort().join(", ")}`);
+      if (reasons.length) return { status: "warn" as const, detail: `mixed backend configuration: ${reasons.join("; ")}; children follow agent.acp_backend, member DMs follow member_acp_backend; ${notes}` };
+      if (!known || mapIssue || families.has("unrecognized") || (current && !currentLabel)) return { status: "warn" as const, detail: `backend composition could not be verified: agent.acp_backend=${selection.global}, member_acp_backend=${selection.member}; compatibility is described in the Backend row; ${notes}` };
+      return { status: selection.global === "kiro-cli" ? "ok" as const : "warn" as const, detail: `${selection.global === "kiro-cli" ? "consistent Kiro CLI configuration" : `consistent backend configuration with limitations: ${selection.global}`}; compatibility is described in the Backend row; ${notes}` };
+    };
+    const compositionRow = composition();
+    row(compositionRow.status, "Crew composition", compositionRow.detail);
+
     // Age is advisory, never expiry. Only explicit reconciliation settles work.
     const sessions = join(projectDir, "aidlc/.aidlc-sessions");
     const ledgerIssues: string[] = [];

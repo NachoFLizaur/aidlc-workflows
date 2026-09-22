@@ -109,6 +109,19 @@ a zero doctor exit with warnings is not startup clearance.
 | App payload mismatch | Follow [replacement](harnesses/kiro-crew.md#update-and-removal), preserve data, and re-grant trust after uninstall |
 | Uncertain child outcome or denied tool call | Stop and reconcile the named condition; do not retry through shell, another backend, or inline work |
 
+For the [Claude backend](harnesses/kiro-crew.md#claude-code-backend):
+
+- **Project collision:** stop sessions and inspect the named Claude files. Move
+  or remove conflicts yourself, or use a clean project; setup never repairs them.
+  An availableModels-only seed warns rather than refuses; close its session and recheck.
+- **Expected warnings:** acknowledge the conductor's listed limitations explicitly
+  in the current conversation, including on resume. Failures and mixed, conflicting,
+  or unverified composition cannot be acknowledged away; repair and rerun doctor.
+- **Receipt ledger full:** entries expire after 10 minutes; capacity is 256 pending
+  paths. Stop producers and preserve the ledger before any operator reset of the
+  exact path in the diagnostic. Setup never resets it. Missing audit rows are not
+  success evidence; do not retry a denied write or invent a receipt.
+
 ### Config warns about an ignore rule hiding committed records
 
 In a Git repository, config checks whether one of your own ignore rules hides

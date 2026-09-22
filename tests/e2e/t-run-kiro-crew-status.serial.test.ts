@@ -14,7 +14,8 @@ test.skipIf(!enabled)("registered Crew bridge binds a recorded conversation and 
     expect(JSON.parse(readFileSync(join(f.home, "apps/aidlc/installed.json"), "utf8")).enabled).toBe(true);
     const key = "dashboard:registration-test";
     // Synthetic host identity exercises registration, not a model conversation.
-    writeFileSync(join(f.home, "session_map.json"), JSON.stringify({ [key]: { cwd: f.project } }));
+    writeFileSync(join(f.home, "session_map.json"), JSON.stringify({ [key]: { cwd: f.project, provider: f.backend === "claude" ? "claude_code" : "acp" } }));
+    expect(JSON.parse(readFileSync(join(f.home, "config.json"), "utf8")).agent.acp_backend).toBe(f.backend === "claude" ? "claude" : "");
     const server = registeredServer(f);
     requireLive();
     client = connect(server, f.project, f.env);
@@ -27,7 +28,7 @@ test.skipIf(!enabled)("registered Crew bridge binds a recorded conversation and 
     const status = await client.request("tools/call", { name: "aidlc_status", arguments: {} });
     expect(status.result?.isError, JSON.stringify(status)).toBe(false);
     expect(status.result?.content?.[0].text).toContain("No active AI-DLC workflow found.");
-    expect(JSON.parse(readFileSync(join(f.project, "aidlc/.aidlc-sessions", `crew-${hash}.binding.json`), "utf8")).intent).toBeNull();
+    expect(JSON.parse(readFileSync(join(f.project, "aidlc/.aidlc-sessions", `crew-${hash}.binding.json`), "utf8"))).toMatchObject({ intent: null, backend: f.backend });
     expect(existsSync(join(f.project, "aidlc/spaces/default/intents/intents.json"))).toBe(false);
   } finally { await client?.close(); cleanupTestProject(f.root); }
 }, NATIVE_FIXTURE_SETUP_TIMEOUT_MS);

@@ -13,6 +13,7 @@ import { parseCrewSkillFrontmatter, validateCrewSkillFrontmatter } from "../../h
 import type { Emission } from "../../harness/kiro-crew/emit/types.ts";
 import { validateCrewStamp } from "../../harness/kiro-crew/hooks/aidlc-kiro-crew-hook-entry.ts";
 import { cleanupTestProject, createTestProject, REPO_ROOT } from "../harness/fixtures.ts";
+import { registrationBackend } from "../harness/kiro-crew-live.ts";
 import { NATIVE_FIXTURE_SETUP_TIMEOUT_MS, NATIVE_MULTI_WORKTREE_CASE_TIMEOUT_MS, NATIVE_STARTUP_TIMEOUT_MS, remainingOperationTimeoutMs } from "../harness/test-budget.ts";
 
 setDefaultTimeout(NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
@@ -282,3 +283,42 @@ test("native packaging refuses invalid decoded routes in JSON strings, nested va
     expect(JSON.parse(readFileSync(f.source, "utf8"))).toEqual(value);
   }
 }, NATIVE_MULTI_WORKTREE_CASE_TIMEOUT_MS);
+
+test("child persona emission retains changed body and project bootstrap resources without native-only frontmatter", () => {
+  const ctx = fixture(); const persona = join(ctx.distRoot, ".kiro-crew/agents/aidlc-developer-agent.md");
+  const source = readFileSync(persona, "utf8"); const body = source.replace(/^---\r?\n[\s\S]*?\r?\n---\r?\n/, "");
+  const addition = "\nRead the project-specific greeting contract.\n";
+  writeFileSync(persona, `---\nname: aidlc-developer-agent\nmodel: native-only\ndisallowedTools: Task, Agent\n---\n${body}${addition}`);
+  const output = collectAppEmissions(ctx); const agent = JSON.parse(output.find(({ path }) => path === "agents/aidlc-developer-agent.json")!.content) as Agent;
+  expect(agent.prompt.endsWith(body + addition)).toBe(true); expect(agent.prompt).not.toContain("model: native-only"); expect(agent.prompt).not.toContain("disallowedTools:");
+  const skills = JSON.parse(output.find(({ path }) => path === "skills.manifest.json")?.content ?? collectSkillEmissions(ctx)[0].content) as CrewSkillsManifest;
+  expect(agent.resources).toContain(skills.delegation); expect(agent.resources).toContain(skills.conductor);
+  expect(agent.tools).toContain("@aidlc:engine/aidlc_bind_session"); expect(agent.allowedTools).not.toContain("@aidlc:engine/aidlc_bind_session");
+  expect(agent.tools.some((tool) => tool.includes("spawn_"))).toBe(false);
+});
+
+test("both packaged bridges advertise the child project selector without permitting extra properties", () => {
+  const root = fresh(); const home = join(root, "crew"); mkdirSync(home);
+  for (const channel of ["dist", "dist-release"]) {
+    const bridge = join(REPO_ROOT, channel, "kiro-crew/kiro-crew-app/mcp/aidlc-mcp-bridge.ts");
+    const result = spawnSync(process.execPath, [bridge, "mcp", "--crew-home", home], { cwd: root, env: { PATH: process.env.PATH, HOME: root }, encoding: "utf8", input: `${JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/list" })}\n`, timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS) });
+    expect(result.status, result.stderr).toBe(0);
+    const schema = JSON.parse(result.stdout).result.tools.find(({ name }: { name: string }) => name === "aidlc_bind_session").inputSchema;
+    expect(schema).toMatchObject({ type: "object", additionalProperties: false, properties: { session_key: { type: "string", minLength: 1 }, project_dir: { type: "string", minLength: 1 } } });
+    expect(schema.required ?? []).toEqual([]); expect(readdirSync(home)).toEqual([]); expect(existsSync(join(root, "aidlc/.aidlc-sessions"))).toBe(false);
+  }
+});
+
+test("registration backend selection defaults to Kiro and refuses invalid selectors before scratch allocation", () => {
+  expect(registrationBackend({})).toBe("kiro"); expect(registrationBackend({ AIDLC_KIRO_CREW_BACKEND: "claude" })).toBe("claude");
+  const root = fresh(); const script = join(root, "registration-input.ts"); const marker = join(root, "scratch-called");
+  writeFileSync(script, `import {mock} from 'bun:test';import {writeFileSync} from 'node:fs';const path=${JSON.stringify(join(REPO_ROOT, "tests/harness/fixtures.ts"))};const fixtures=await import(path);mock.module(path,()=>({...fixtures,createTestProject:()=>{writeFileSync(${JSON.stringify(marker)},'called');throw new Error('scratch called');}}));const {createRegistration}=await import(${JSON.stringify(join(REPO_ROOT, "tests/harness/kiro-crew-live.ts"))});createRegistration();`);
+  for (const backend of ["codex", "kas", "", "CLAUDE", "other"]) {
+    const result = spawnSync(process.execPath, [script], { cwd: root, env: { PATH: process.env.PATH, AIDLC_KIRO_CREW_LIVE: "1", AIDLC_KIRO_CREW_BACKEND: backend }, encoding: "utf8", timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS) });
+    expect(result.status).not.toBe(0); expect(result.stderr).toContain("backend must be kiro or claude"); expect(existsSync(marker)).toBe(false);
+  }
+  for (const env of [{ AIDLC_KIRO_CREW_LIVE: "0" }, { AIDLC_KIRO_CREW_LIVE: "1", AIDLC_NO_LLM: "1" }]) {
+    const result = spawnSync(process.execPath, [script], { cwd: root, env: { PATH: process.env.PATH, AIDLC_KIRO_CREW_BACKEND: "claude", ...env }, encoding: "utf8", timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS) });
+    expect(result.status).not.toBe(0); expect(result.stderr).toContain("explicit live opt-in"); expect(existsSync(marker)).toBe(false);
+  }
+});

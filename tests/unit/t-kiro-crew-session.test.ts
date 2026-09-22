@@ -26,7 +26,7 @@ function snapshot(root: string): Record<string, string> {
   const visit = (dir: string) => { if (!existsSync(dir)) return; for (const entry of readdirSync(dir, { withFileTypes: true })) { const path = join(dir, entry.name); if (entry.isDirectory()) { result[`${relative(root, path)}/`] = "dir"; visit(path); } else if (entry.isFile()) result[relative(root, path)] = `${statSync(path).mtimeMs}:${readFileSync(path).toString("base64")}`; } };
   visit(root); return result;
 }
-function fixture() {
+function fixture(provider = "acp") {
   const root = fresh(); const home = join(root, "crew"); const app = join(root, "app"); const gateway = join(root, "gateway"); mkdirSync(home); mkdirSync(gateway); cpSync(join(runtime, "kiro-crew-app"), app, { recursive: true });
   const project = fresh();
   for (const part of [".kiro-crew", "aidlc"]) cpSync(join(runtime, part), join(project, part), { recursive: true });
@@ -35,7 +35,7 @@ function fixture() {
   const env = testGuardEnvironment({ PATH: process.env.PATH, HOME: root, TMPDIR: root, KIROCREW_HOME: home, KIROCREW_SESSION_KEY: key, AIDLC_INSTALL_ROOT: join(root, "machine"), AIDLC_BIN_DIR: join(root, "bin"), AIDLC_UNATTENDED: "0" }, "production");
   const binding = join(home, "apps/aidlc/data/bindings", `${sessionHash(key)}.json`);
   const engineBinding = join(project, "aidlc/.aidlc-sessions", `${session}.binding.json`);
-  const map = (value: unknown = { [key]: { cwd: project } }) => json(join(home, "session_map.json"), value);
+  const map = (value: unknown = { [key]: { cwd: project, provider } }) => json(join(home, "session_map.json"), value);
   const rpc = (requests: unknown[], options: { env?: NodeJS.ProcessEnv; args?: string[]; preload?: string; raw?: string } = {}) => spawnSync(process.execPath, [
     ...(options.preload ? ["--preload", options.preload] : []), join(app, "mcp/aidlc-mcp-bridge.ts"), ...(options.args ?? ["mcp", "--crew-home", home]),
   ], { cwd: gateway, env: { ...env, ...options.env }, encoding: "utf8", input: options.raw ?? `${requests.map((value) => JSON.stringify(value)).join("\n")}\n`, timeout: remainingOperationTimeoutMs(NATIVE_FIXTURE_SETUP_TIMEOUT_MS), maxBuffer: 10 * 1024 * 1024 });
@@ -91,11 +91,13 @@ test("both binding readers distinguish missing, null, valid and corrupt state wi
 });
 
 test("a warm bridge rekeys and routes two projects without cross-project state writes", async () => {
+  for (const provider of ["acp", "claude_code"]) {
   const f = fixture(); const other = fresh();
   for (const part of [".kiro-crew", "aidlc"]) cpSync(join(runtime, part), join(other, part), { recursive: true }); removeWorkspaceRecord(other);
-  const second = "dashboard:second"; f.map({ [f.key]: { cwd: f.project }, [second]: { cwd: other } });
+  const second = "dashboard:second"; f.map({ [f.key]: { cwd: f.project, provider }, [second]: { cwd: other, provider } });
   const mapping = join(f.home, `session_pid_${process.pid}.txt`); writeFileSync(mapping, `${f.key}\n`);
-  const c = f.client({ KIROCREW_SESSION_KEY: undefined, KIROCREW_HOST_PID: String(process.pid) });
+  const scratch = join(f.root, "node-session"); mkdirSync(scratch); writeFileSync(join(scratch, ".owner"), String(process.pid));
+  const c = f.client({ KIROCREW_SESSION_KEY: undefined, KIROCREW_HOST_PID: provider === "acp" ? String(process.pid) : undefined, KIROCREW_SCRATCH: scratch });
   const beforeOther = snapshot(join(other, "aidlc"));
   ok(await c.request("tools/call", { name: "aidlc_status", arguments: {} }));
   expect(snapshot(join(other, "aidlc"))).toEqual(beforeOther); expect(existsSync(f.engineBinding)).toBe(true);
@@ -105,12 +107,15 @@ test("a warm bridge rekeys and routes two projects without cross-project state w
   expect(existsSync(join(other, "aidlc/.aidlc-sessions", `crew-${sessionHash(second)}.binding.json`))).toBe(true);
   expect(existsSync(join(f.project, "aidlc/.aidlc-sessions", `crew-${sessionHash(second)}.binding.json`))).toBe(false);
   expect(existsSync(join(f.gateway, "aidlc"))).toBe(false);
+  expect(JSON.parse(readFileSync(f.engineBinding, "utf8")).backend).toBe(provider === "acp" ? "kiro" : "claude");
+  }
 });
 
 test("repeated status and AgentSpawn preserve null selection and binding provenance", () => {
   const f = fixture(); f.map(); ok(f.call().response);
   const route = JSON.parse(readFileSync(f.binding, "utf8")); expect(route.source).toBe("session-map");
-  writeSessionBinding(f.project, f.session, "team", null); const before = readFileSync(f.engineBinding); const mtime = statSync(f.engineBinding).mtimeMs;
+  writeSessionBinding(f.project, f.session, "team", null); ok(f.call().response);
+  const before = readFileSync(f.engineBinding); const mtime = statSync(f.engineBinding).mtimeMs;
   for (let i = 0; i < 2; i++) { ok(f.call().response); expect(f.hook("AgentSpawn").status).toBe(0); }
   expect(readFileSync(f.engineBinding)).toEqual(before); expect(statSync(f.engineBinding).mtimeMs).toBe(mtime);
   expect(JSON.parse(readFileSync(f.binding, "utf8"))).toEqual(route);
@@ -204,7 +209,8 @@ test("engine timeout and output overflow are tool errors rather than successful 
 });
 
 test("real same-session human summary confirmation records authority; automation and forged answers cannot", () => {
-  const f = fixture(); f.map(); ok(f.call().response);
+  for (const provider of ["acp", "claude_code"]) {
+  const f = fixture(provider); f.map(); ok(f.call().response);
   ok(f.call("aidlc_engine", { args: ["engine", "intent", "create", "--scope", "express", "--arguments", "build a greeting", "--label", "greeting"] }).response);
   const selection = JSON.parse(readFileSync(f.engineBinding, "utf8")) as { intent: string };
   const record = join(f.project, "aidlc/spaces/default/intents", selection.intent);
@@ -221,27 +227,105 @@ test("real same-session human summary confirmation records authority; automation
   const rows = readAuditShardEvents(f.project, selection.intent, "default");
   expect(rows.filter(({ event }) => event === "SUMMARY_CONFIRMATION_RECORDED")).toHaveLength(1);
   expect(rows.filter(({ event }) => event === "HUMAN_TURN").map(({ block }) => auditBlockField(block, "Session"))).toEqual([f.session]);
+  }
 });
 
 test("engine-owned plan approval accepts own-words through the Crew hook and opens generation only afterwards", () => {
-  const f = fixture(); f.map();
+  for (const provider of ["acp", "claude_code"]) {
+  const f = fixture(provider); f.map();
   // Seed only work and plan inputs; the engine creates the ask and receipt.
   const record = seededRecordDir(f.project); mkdirSync(record, { recursive: true });
   json(join(dirname(record), "intents.json"), [{ uuid: "00000000-0000-7000-8000-000000000001", slug: "fixture", dirName: basename(record), status: "in-flight" }]);
   writeFileSync(join(dirname(record), "active-intent"), basename(record)); seedStateFile(f.project, "state-brownfield-feature.md");
   const state = readFileSync(seededStateFile(f.project), "utf8").replace("- **Scope**: feature", "- **Scope**: poc").replace("- **Change Control**: strict (from scope feature)", "- **Guard Policy**: strict (set by you)\n- **Plan Approval**: on (set by you)").replace(/^- \*\*Current Stage\*\*:.*$/m, "- **Current Stage**: code-generation");
   writeFileSync(seededStateFile(f.project), state); writeSessionBinding(f.project, f.session, "default", basename(record)); bindCrewSession(f.home, f.project, f.key);
+  ok(f.call().response);
   const stage = join(record, "construction/code-generation"); mkdirSync(stage, { recursive: true });
   const contract = withEnvAndFreshCaches(f.engineEnv, () => renderTestingContract(resolveTestingPosture(f.project)));
   writeFileSync(join(stage, "code-generation-plan.md"), `# Code Generation Plan\n\n## Summary\n\n- Builds: greeting\n- Touches: src/greeting.ts\n\n## Steps\n\n- [ ] Build greeting\n\n${contract}`);
   writeFileSync(join(stage, "unit-test-instructions.md"), "# Unit Test Instructions\n\nCheck greeting output.\n");
   const next = () => runOrchestrateNext(join(f.project, ".kiro-crew/tools/aidlc-orchestrate.ts"), f.project, [], { cwd: f.project, env: f.engineEnv });
   const ask = next(); expect(ask.status, ask.out).toBe(0); expect(ask.directive).toMatchObject({ kind: "ask", ask_type: "plan-approval" });
-  const write = () => f.hook("PreToolUse", { tool_name: "fs_write", tool_input: { command: "create", path: join(f.project, "src/greeting.ts") } });
+  const write = () => f.hook("PreToolUse", { tool_name: provider === "acp" ? "fs_write" : "Write", tool_input: { command: "create", path: join(f.project, "src/greeting.ts") } });
   expect(write().status).toBe(2);
   expect(f.hook("UserPromptSubmit", { prompt: "[Continue — requested by the user] approve the plan" }).status).toBe(0); expect(write().status).toBe(2);
   expect(f.hook("UserPromptSubmit", { prompt: "I approve the plan, please go ahead." }).status).toBe(0);
   const approved = next(); expect(approved.status, approved.out).toBe(0); expect(approved.directive).toMatchObject({ kind: "run-stage", plan_approval: { status: "approved" } });
   expect(write().status).toBe(0);
   expect(readAuditShardEvents(f.project, basename(record), "default").filter(({ event }) => event === "PLAN_APPROVAL_RECORDED")).toHaveLength(1);
+  }
+});
+
+test("Claude child binds its parent project from a distinct cwd and preserves routing provenance on reuse", () => {
+  const f = fixture("claude_code"); const child = "subagent:developer"; const childSession = `crew-${sessionHash(child)}`;
+  const route = join(dirname(f.binding), `${sessionHash(child)}.json`); const engine = join(dirname(f.engineBinding), `${childSession}.binding.json`);
+  json(join(f.home, "config.json"), { agent: { subagent_cwd_allowed_roots: [f.project] } });
+  f.map({ [f.key]: { cwd: f.project, provider: "claude_code" }, [child]: { cwd: f.gateway, provider: "claude_code" } });
+  const options = { env: { KIROCREW_SESSION_KEY: child } };
+  const result = JSON.parse(ok(f.call("aidlc_bind_session", { project_dir: f.project }, options).response));
+  expect(result).toMatchObject({ projectDir: f.project, source: "project-dir", backend: "claude", keyHash: sessionHash(child) });
+  expect(existsSync(f.engineBinding)).toBe(false); expect(existsSync(join(f.gateway, "aidlc"))).toBe(false);
+  const prior = JSON.parse(readFileSync(route, "utf8")); json(route, { ...prior, retained: "extra" });
+  const bytes = readFileSync(route); const mtime = statSync(route).mtimeMs;
+  for (let i = 0; i < 2; i++) ok(f.call("aidlc_status", {}, options).response);
+  expect(readFileSync(route)).toEqual(bytes); expect(statSync(route).mtimeMs).toBe(mtime); expect(JSON.parse(readFileSync(engine, "utf8")).intent).toBeNull();
+  const before = snapshot(join(f.project, "aidlc"));
+  json(join(f.home, "config.local.json"), { agent: { subagent_cwd_allowed_roots: [] } });
+  expect(f.call("aidlc_status", {}, options).response.result?.isError).toBe(true); expect(snapshot(join(f.project, "aidlc"))).toEqual(before);
+  rmSync(join(f.home, "config.local.json")); const stamp = join(f.project, ".kiro-crew/tools/data/aidlc-stamp.json"); writeFileSync(stamp, "{}");
+  expect(f.call("aidlc_status", {}, options).response.result?.isError).toBe(true); expect(readFileSync(route)).toEqual(bytes);
+});
+
+test("child selectors reject wrong identity, schema, roots and project switches before binding writes", () => {
+  const f = fixture("claude_code"); f.map(); const child = "subagent:developer";
+  json(join(f.home, "config.json"), { agent: { subagent_cwd_allowed_roots: [f.project] } });
+  const call = (args: unknown, env: NodeJS.ProcessEnv = { KIROCREW_SESSION_KEY: child }) => f.call("aidlc_bind_session", args, { env }).response;
+  const before = snapshot(f.home); const state = snapshot(join(f.project, "aidlc"));
+  for (const args of [{ project_dir: "" }, { project_dir: "\0" }, { project_dir: f.project, extra: true }, { project_dir: f.project, session_key: f.key }, { project_dir: f.gateway }]) {
+    expect(call(args).result?.isError).toBe(true); expect(snapshot(f.home)).toEqual(before); expect(snapshot(join(f.project, "aidlc"))).toEqual(state);
+  }
+  for (const identity of [undefined, "subagent:", f.key, "subagent:bad\nkey"]) {
+    expect(call({ project_dir: f.project }, { KIROCREW_SESSION_KEY: identity }).result?.isError).toBe(true); expect(snapshot(f.home)).toEqual(before);
+  }
+  const outside = fresh(); for (const part of [".kiro-crew", "aidlc"]) cpSync(join(runtime, part), join(outside, part), { recursive: true });
+  const link = join(f.project, "escape"); symlinkSync(outside, link);
+  expect(call({ project_dir: link }).result?.isError).toBe(true); expect(snapshot(f.home)).toEqual(before);
+  ok(call({ project_dir: f.project }));
+  const childPath = join(dirname(f.binding), `${sessionHash(child)}.json`); const bytes = readFileSync(childPath);
+  json(join(f.home, "config.json"), { agent: { subagent_cwd_allowed_roots: [f.project, outside] } });
+  expect(call({ project_dir: outside }).result?.isError).toBe(true); expect(readFileSync(childPath)).toEqual(bytes);
+  writeFileSync(join(f.home, "config.local.json"), "{");
+  expect(call({ project_dir: f.project }).result?.isError).toBe(true); expect(readFileSync(childPath)).toEqual(bytes);
+  expect(JSON.parse(readFileSync(join(dirname(f.engineBinding), `crew-${sessionHash(child)}.binding.json`), "utf8")).backend).toBe("unknown");
+});
+
+test("backend publication preserves selection and extras while disagreement stays sticky across engine rewrites", () => {
+  const f = fixture("claude_code"); f.map(); ok(f.call().response);
+  const initial = JSON.parse(readFileSync(f.engineBinding, "utf8")); expect(initial).toMatchObject({ backend: "claude", intent: null });
+  json(f.engineBinding, { ...initial, space: "team", retained: true }); ok(f.call().response);
+  const before = readFileSync(f.engineBinding); expect(JSON.parse(before.toString())).toMatchObject({ ...initial, space: "team", retained: true });
+  ok(f.call().response); expect(readFileSync(f.engineBinding)).toEqual(before);
+  f.map({ [f.key]: { cwd: f.project } }); ok(f.call().response); expect(JSON.parse(readFileSync(f.engineBinding, "utf8")).backend).toBe("unknown");
+  f.map(); ok(f.call().response); f.map({ [f.key]: { cwd: f.project, provider: "acp" } }); ok(f.call().response);
+  expect(JSON.parse(readFileSync(f.engineBinding, "utf8"))).toMatchObject({ backend: "unknown", backendConflict: true, space: "team", retained: true, boundAt: initial.boundAt });
+  const engine = join(f.project, ".kiro-crew/tools/aidlc.ts");
+  writeFileSync(engine, `import {readFileSync,writeFileSync} from 'node:fs';const p=${JSON.stringify(f.engineBinding)};const b=JSON.parse(readFileSync(p,'utf8'));delete b.backend;delete b.backendConflict;writeFileSync(p,JSON.stringify(b));console.log('rewritten');`);
+  f.map(); expect(ok(f.call().response)).toContain("rewritten");
+  expect(JSON.parse(readFileSync(f.engineBinding, "utf8"))).toMatchObject({ backend: "unknown", backendConflict: true, space: "team", retained: true, boundAt: initial.boundAt });
+});
+
+test("backend publication races and missing or corrupt post-execution bindings never report successful engine output", () => {
+  for (const fault of ["missing", "corrupt", "changed"]) {
+    const f = fixture("claude_code"); f.map(); ok(f.call().response);
+    const engine = join(f.project, ".kiro-crew/tools/aidlc.ts");
+    writeFileSync(engine, `import {rmSync,writeFileSync,readFileSync} from 'node:fs';const p=${JSON.stringify(f.engineBinding)};${fault === "missing" ? "rmSync(p)" : fault === "corrupt" ? "writeFileSync(p,'{')" : "const b=JSON.parse(readFileSync(p,'utf8'));delete b.backend;writeFileSync(p,JSON.stringify(b))"};console.log('must not be success');`);
+    const preload = join(f.root, "publication-race.ts");
+    writeFileSync(preload, `import {mock} from 'bun:test';import * as fs from 'node:fs';const write=fs.writeFileSync;mock.module('node:fs',()=>({...fs,writeFileSync:(...args)=>{const result=write(...args);if(String(args[0]).startsWith(${JSON.stringify(f.engineBinding)}+'.'))write(${JSON.stringify(f.engineBinding)},'competing');return result;}}));`);
+    const result = f.call("aidlc_status", {}, fault === "changed" ? { preload } : {});
+    expect(result.response.result?.isError).toBe(true); expect(result.response.result?.content?.[0].text).toContain("backend publication after engine execution failed");
+    expect(result.response.result?.content?.[0].text).not.toContain("must not be success");
+    if (fault === "missing") expect(existsSync(f.engineBinding)).toBe(false);
+    else expect(readFileSync(f.engineBinding, "utf8")).toBe(fault === "changed" ? "competing" : "{");
+    expect(readdirSync(dirname(f.engineBinding)).some((name) => name.endsWith(".tmp"))).toBe(false);
+  }
 });

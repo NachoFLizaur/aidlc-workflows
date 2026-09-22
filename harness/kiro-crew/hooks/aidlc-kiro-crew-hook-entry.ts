@@ -11,7 +11,7 @@
  * backend-start notifications are advisory and child delivery is not guaranteed.
  */
 import { createHash } from "node:crypto";
-import { accessSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, statSync, writeFileSync } from "node:fs";
+import { accessSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir, userInfo } from "node:os";
 import { basename, isAbsolute, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -77,6 +77,47 @@ const object = (value: unknown): value is JsonObject =>
   value !== null && typeof value === "object" && !Array.isArray(value);
 const text = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
 const EVENTS = new Set(["AgentSpawn", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]);
+
+export type CrewBackend = "kiro" | "claude" | "unknown";
+
+// Bounded no-follow snapshots supply observations, not process identity.
+function backendRecord(path: string): JsonObject | undefined {
+  let fd: number | undefined;
+  try {
+    fd = openSync(path, constants.O_RDONLY | constants.O_NOFOLLOW | constants.O_NONBLOCK);
+    const stat = fstatSync(fd);
+    if (!stat.isFile() || stat.size > 4 * 1024 * 1024) return undefined;
+    const buffer = Buffer.alloc(4 * 1024 * 1024 + 1);
+    const size = readSync(fd, buffer, 0, buffer.length, 0);
+    if (size === buffer.length) return undefined;
+    const value: unknown = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(buffer.subarray(0, size)));
+    return object(value) ? value : undefined;
+  } catch { return undefined; }
+  finally { if (fd !== undefined) closeSync(fd); }
+}
+
+/** Read the own-key provider on every call before publication/import, never
+ * config, tool titles or executable names. acp/kiro/kas share the Kiro grammar,
+ * not a support guarantee. Missing, unreadable or other providers yield unknown;
+ * first-run child identity without a map entry is not backend evidence. No bypass. */
+export function crewBackendFromRecords(home: string, key: string): CrewBackend {
+  const map = backendRecord(join(home, "session_map.json"));
+  const entry = map && Object.hasOwn(map, key) ? map[key] : undefined;
+  const provider = object(entry) ? entry.provider : undefined;
+  return provider === "claude_code" ? "claude" : provider === "acp" || provider === "kiro" || provider === "kas" ? "kiro" : "unknown";
+}
+
+/** Read the exact parent-key binding and current provider before pins/import.
+ * Missing, malformed or conflicting observations overwrite inherited pins with
+ * unknown: guarded Pre refuses, Post emits no row. backendConflict stays sticky
+ * until operator repair. Child hooks observe the parent, not the child's backend;
+ * mixed configurations are not admitted by the conductor. No disabling flag. */
+export function boundCrewBackend(home: string, project: string, key: string): CrewBackend {
+  const hash = createHash("sha256").update(key, "utf8").digest("hex");
+  const binding = backendRecord(join(project, "aidlc/.aidlc-sessions", `crew-${hash}.binding.json`));
+  const current = crewBackendFromRecords(home, key);
+  return binding?.backendConflict === undefined && binding?.backend === current ? current : "unknown";
+}
 
 // Capture only named host variables, never the credential-bearing environment.
 export const CAPTURE_ENV_KEYS = [
@@ -242,6 +283,7 @@ async function main(): Promise<number> {
     // One-shot pins precede import; never inherit a foreign native engine.
     process.env.AIDLC_PROJECT_DIR = projectDir;
     process.env.AIDLC_SESSION_OVERRIDE = `crew-${key}`;
+    process.env.AIDLC_CREW_BACKEND = boundCrewBackend(home, projectDir, payload.parent_session_key as string);
     process.env.AIDLC_HARNESS_DIR = ".kiro-crew";
     process.env.AIDLC_HARNESS_NAME = "kiro-crew";
     delete process.env.AIDLC_COMPILED_EXECUTABLE;

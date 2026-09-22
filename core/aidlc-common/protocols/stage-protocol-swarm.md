@@ -548,6 +548,8 @@ Swarm fan-out is **unsupported** on Kiro Crew. **You — the live conductor — 
 
 Offer the non-swarm ensemble path in the ensemble module's **Kiro Crew** subsection with `delegation.md` transport. Wait for the human's choice; never silently convert the directive or change its autonomy grant. Missing alternative binding/tools leaves the stop in place.
 
+**Task-carried bootstrap (alternative only).** After the human's explicit choice and an authorized non-swarm directive, every alternative worker follows `delegation.md` §2's ordered child brief: role, absolute parent-project persona-first read/engine path, explicit ensemble/construction/main protocol reads, ordered rules, task and ACK. Claude adds parent-project `aidlc_bind_session` BEFORE engine operations through `aidlc_engine` argv. Apply §4 delivery verification before accepting work. Authorized continuation uses the same explicit agent, compact child header, ordered pointers, Claude bind/argv and fresh ACK; initial and continued tasks are at most 5,000 characters. Missing evidence stops without silent retry. This is not native Task/Agent denial enforcement or permission for swarm dispatch: the unsupported stop still wins.
+
 Support requires all of these conditions, which this integration does not establish:
 
 - **Per-worktree transport:** one `spawn_run.cwd` covers all tasks. Distinct worktrees require distinct single-cwd calls with their own intend/confirm, but the current transport requires END TURN after one spawn and immediate bookkeeping. Never improvise multiple calls or move children between worktrees.

@@ -4,13 +4,15 @@ import { afterEach, expect, test, setDefaultTimeout } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { constants, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
-import { auditBlockField, readAuditShardEvents, summaryAuthorizationRecordPath, writeSessionBinding } from "../../core/tools/aidlc-lib.ts";
+import { auditBlockField, readAuditShardEvents, runWithOwnerStampedLock, summaryAuthorizationRecordPath, writeSessionBinding } from "../../core/tools/aidlc-lib.ts";
+import { boundCrewBackend, crewBackendFromRecords } from "../../harness/kiro-crew/hooks/aidlc-kiro-crew-hook-entry.ts";
 import { cleanupTestProject, createTestProject, REPO_ROOT, seededAuditShard, seededRecordDir, seedStateFile } from "../harness/fixtures.ts";
 import { testGuardEnvironment } from "../harness/runner-profile.ts";
 import { NATIVE_FIXTURE_SETUP_TIMEOUT_MS, NATIVE_STARTUP_TIMEOUT_MS, remainingOperationTimeoutMs } from "../harness/test-budget.ts";
 import corpus from "../fixtures/kiro-crew/payloads.json";
+import claudeCorpus from "../fixtures/kiro-crew/claude-payloads.json";
 
 setDefaultTimeout(NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
 const roots: string[] = [];
@@ -32,7 +34,14 @@ function fixture() {
   const env = testGuardEnvironment({ ...process.env, HOME: home, KIROCREW_HOME: home, AIDLC_PROJECT_DIR: project,
     CLAUDE_PROJECT_DIR: undefined, AIDLC_SESSION_OVERRIDE: undefined, AIDLC_SESSION_OVERRIDE_SOURCE: undefined,
     AIDLC_COMPILED_EXECUTABLE: undefined, KIROCREW_HOOK_EVENT: undefined, KIROCREW_HOOK_CONTEXT: undefined, AIDLC_UNATTENDED: undefined,
-    AIDLC_HARNESS_NAME: "kiro-crew", AIDLC_HARNESS_DIR: ".kiro-crew" }, "production");
+    AIDLC_HARNESS_NAME: "kiro-crew", AIDLC_HARNESS_DIR: ".kiro-crew", AIDLC_CREW_BACKEND: "kiro" }, "production");
+  const engineBinding = join(project, "aidlc/.aidlc-sessions", `${session}.binding.json`);
+  const observe = (backend = "kiro", provider: unknown = "acp", extra: Payload = {}) => {
+    mkdirSync(dirname(engineBinding), { recursive: true });
+    writeFileSync(engineBinding, JSON.stringify({ space: "default", intent: null, boundAt: new Date().toISOString(), backend, ...extra }));
+    writeFileSync(join(home, "session_map.json"), JSON.stringify({ [key]: { cwd: project, provider } }));
+  };
+  observe();
   const payload = (name: Exclude<keyof typeof corpus, "automation">): Payload => JSON.parse(JSON.stringify(corpus[name]).replaceAll("{{PROJECT}}", project).replaceAll("{{ARTIFACT}}", artifact));
   const invoke = (data: Payload | string, options: { entry?: boolean; env?: NodeJS.ProcessEnv; target?: string; route?: string[]; preload?: string } = {}) => {
     const event = options.target ?? (typeof data === "string" ? "PreToolUse" : String(data.hook_event_name));
@@ -44,7 +53,7 @@ function fixture() {
   const binding = join(home, "apps/aidlc/data/bindings", `${hash}.json`);
   const bind = () => { mkdirSync(dirname(binding), { recursive: true }); writeFileSync(binding, JSON.stringify({ projectDir: project, boundAt: new Date().toISOString() })); };
   const pre = (tool_name: string, tool_input?: unknown, extra: Payload = {}) => ({ hook_event_name: "PreToolUse", parent_session_key: key, tool_name, ...(tool_input === undefined ? {} : { tool_input }), ...extra });
-  return { project, tree, home, gateway, adapter, entry, artifact, env, payload, invoke, binding, bind, pre };
+  return { project, tree, home, gateway, adapter, entry, artifact, env, payload, invoke, binding, bind, pre, engineBinding, observe };
 }
 type Fixture = ReturnType<typeof fixture>;
 function instrument(f: Fixture, responses: Record<string, { code?: number; stdout?: string; stderr?: string }> = {}) {
@@ -94,6 +103,7 @@ test("missing guards refuse before read-only exemptions and subprocess refusals 
 
 test("unexpected core failure denies permission calls but remains advisory for notifications", () => {
   const f = fixture(); instrument(f, { "state-transition-guard": { code: 1 }, "session-start": { code: 1 } });
+  rmSync(f.engineBinding);
   const denied = f.invoke(f.payload("write")); expect(denied.status).toBe(2); expect(denied.stderr).toContain("failed (exit 1)");
   const advisory = f.invoke(f.payload("spawn")); expect(advisory.status).toBe(0); expect(advisory.stderr).toContain("failed (exit 1)");
 });
@@ -184,6 +194,7 @@ test("admitted human turns get fresh dispatcher tokens and automation cannot ent
 
 test("AgentSpawn unwraps core context and a valid binding avoids lifecycle replay", () => {
   const f = fixture(); const calls = instrument(f, { "session-start": { stdout: JSON.stringify({ additionalContext: "workflow context" }) } });
+  rmSync(f.engineBinding);
   expect(f.invoke(f.payload("spawn")).stdout).toBe("workflow context");
   writeSessionBinding(f.project, session, "team", null);
   expect(f.invoke(f.payload("spawn")).stdout).toBe(`AIDLC Runtime Session: ${session}\n`);
@@ -317,4 +328,229 @@ test("unsafe capture files and ownership failures leave the adapter verdict unch
     if (fault === "exclusive") expect(JSON.parse(readFileSync(join(f.project, "capture-flags.json"), "utf8")) & constants.O_EXCL).toBe(constants.O_EXCL);
     if (fault === "owner" || fault === "exclusive" || fault === "capture-link") expect(f.invoke(f.payload("write"), { entry: true, preload }).stderr).toContain("outcome unchanged");
   }
+});
+
+type Receipt = { path: string; atMs: number; commandHash: string };
+function claudeFixture() {
+  const f = postFixture(); f.env.AIDLC_CREW_BACKEND = "claude";
+  // Isolate adapter correlation from guard policy, but keep the actual audit hook.
+  const calls = instrument(f);
+  cpSync(join(REPO_ROOT, "dist/kiro-crew/.kiro-crew/hooks/aidlc-write-audit-log.ts"), join(f.tree, "hooks/aidlc-write-audit-log.ts"));
+  const path = join(f.home, "apps/aidlc/data/receipts", `${hash}.jsonl`);
+  const entries = (): Receipt[] => existsSync(path) ? readFileSync(path, "utf8").trim().split("\n").filter(Boolean).map((line) => JSON.parse(line)) : [];
+  const seed = (rows: Receipt[]) => { mkdirSync(dirname(path), { recursive: true }); writeFileSync(path, rows.map((row) => JSON.stringify(row)).join("\n") + (rows.length ? "\n" : "")); };
+  const payload = (name: "request" | "receipt" | "failure" | "rejection", artifact = f.artifact): Payload => JSON.parse(JSON.stringify(claudeCorpus[name]).replaceAll("{{KEY}}", key).replaceAll("{{ARTIFACT}}", artifact));
+  const clock = join(f.project, "clock.ts");
+  const at = (data: Payload, ms: number, env: NodeJS.ProcessEnv = {}) => { writeFileSync(clock, `Date.now = () => ${ms};`); return f.invoke(data, { preload: clock, env }); };
+  const now = Date.now();
+  const fresh = (ms = now, file = f.artifact) => { writeFileSync(file, "# Requirements\n"); utimesSync(file, ms / 1000, ms / 1000); };
+  return { ...f, calls, path, entries, seed, claude: payload, at, now, fresh };
+}
+
+test("backend observations require the own provider and safe corroborating binding before import", () => {
+  const f = fixture(); const map = join(f.home, "session_map.json");
+  for (const [provider, backend] of claudeCorpus.providers) {
+    f.observe(String(backend), provider);
+    expect<string>(crewBackendFromRecords(f.home, key)).toBe(String(backend)); expect<string>(boundCrewBackend(f.home, f.project, key)).toBe(String(backend));
+  }
+  for (const path of [map, f.engineBinding]) for (const fault of ["missing", "foreign", "malformed", "oversize", "link", "directory"]) {
+    f.observe(); rmSync(path);
+    if (fault === "link") symlinkSync(f.adapter, path);
+    else if (fault === "directory") mkdirSync(path);
+    else if (fault !== "missing") writeFileSync(path, fault === "foreign" ? JSON.stringify({ foreign: { provider: "acp" } }) : fault === "oversize" ? " ".repeat(4 * 1024 * 1024 + 1) : "{");
+    expect(boundCrewBackend(f.home, f.project, key), `${path}:${fault}`).toBe("unknown"); rmSync(path, { recursive: true, force: true });
+  }
+  const marker = join(f.project, "backend.json");
+  writeFileSync(f.adapter, `import {writeFileSync} from 'node:fs'; const backend=process.env.AIDLC_CREW_BACKEND; export function run(){writeFileSync(${JSON.stringify(marker)},JSON.stringify(backend));return 0;}`);
+  for (const extra of [{}, { backendConflict: true }, { backendConflict: false }]) {
+    f.observe("claude", "claude_code", extra);
+    expect(f.invoke({ ...f.payload("write"), ...claudeCorpus.child }, { entry: true, env: { AIDLC_CREW_BACKEND: "kiro" } }).status).toBe(0);
+    expect(JSON.parse(readFileSync(marker, "utf8"))).toBe("backendConflict" in extra ? "unknown" : "claude");
+  }
+});
+
+test("unresolved backend refuses participating Pre and drops Post without defeating opt-out or guard checks", () => {
+  const f = postFixture(); const calls = instrument(f);
+  for (const backend of [undefined, "unknown", "claude_code", "kas", ""]) {
+    const env = { AIDLC_CREW_BACKEND: backend };
+    const pre = f.invoke(f.pre("mcp__aidlc_engine__aidlc_status", {}), { env });
+    expect(pre.status).toBe(2); expect(pre.stderr).toContain("unknown or conflicting backend");
+    expect(f.invoke(f.payload("created"), { env }).status).toBe(0); expect(f.rows()).toEqual([]);
+  }
+  f.observe("kiro", "claude_code");
+  expect(f.invoke(f.payload("write"), { entry: true }).status).toBe(2); expect(calls()).toEqual([]);
+  expect(f.invoke(f.payload("write"), { entry: true, env: { AIDLC_PROJECT_DIR: undefined } }).stderr).toContain("not participating");
+  rmSync(join(f.tree, "hooks/aidlc-plan-approval-guard.ts"));
+  const result = f.invoke(f.pre("mcp__aidlc_engine__aidlc_status", {}), { env: { AIDLC_CREW_BACKEND: "claude" } });
+  expect(result.status).toBe(2); expect(result.stderr).toContain("aidlc-plan-approval-guard.ts");
+});
+
+test("Claude MCP aliases exempt exact schemas while malformed bind selectors stay guarded", () => {
+  const f = claudeFixture();
+  for (const name of ["mcp__aidlc_engine__aidlc_bind_session", "@aidlc:engine/aidlc_bind_session"]) {
+    for (const input of [{}, { session_key: key }, { project_dir: f.project }, { session_key: key, project_dir: f.project }]) expect(f.invoke(f.pre(name, input)).status).toBe(0);
+    expect(f.calls()).toEqual([]);
+  }
+  for (const input of [undefined, { extra: true }, { session_key: "" }, { project_dir: "\0" }, { project_dir: 1 }]) {
+    const before = f.calls().length; expect(f.invoke(f.pre("mcp__aidlc_engine__aidlc_bind_session", input)).status).toBe(0);
+    expect(f.calls().slice(before).map(({ payload }) => payload.tool_name)).toEqual(guards.map(() => "mcp__aidlc:engine__aidlc_bind_session"));
+  }
+  const start = f.calls().length;
+  expect(f.invoke(f.pre("mcp__aidlc_engine__aidlc_engine", { args: ["engine", "orchestrate", "next"] })).status).toBe(0);
+  expect(f.calls().slice(start).map(({ payload }) => payload.tool_name)).toEqual(guards.map(() => "Bash")); expect(f.entries()).toEqual([]);
+});
+
+test("Claude omitted fields stay advisory except native delegation, shell commands and reviewer vetoes", () => {
+  const f = claudeFixture();
+  for (const title of claudeCorpus.omitted) {
+    const result = f.invoke(f.pre(title)); expect(result.status).toBe(0); expect(result.stderr).toContain("advisory");
+    expect(f.invoke(f.pre(title, undefined, { agent_role: "aidlc-crew-product-lead-agent" })).status).toBe(2);
+  }
+  for (const title of ["Task", "Agent", "Bash", "Terminal"]) {
+    const result = f.invoke(f.pre(title)); expect(result.status).toBe(2);
+    expect(result.stderr).toContain(title === "Task" || title === "Agent" ? "notification-path denial is advisory" : "malformed guarded tool input");
+  }
+  expect(f.calls()).toEqual([]);
+  expect(f.invoke(f.pre("Read requirements.md", { file_path: f.artifact })).status).toBe(0);
+  expect(f.calls().map(({ payload }) => payload.tool_input?.file_path)).toEqual(guards.map(() => f.artifact));
+  for (const path of ["../escape", "\0"]) expect(f.invoke(f.pre("Write requirements.md", { file_path: path })).status).toBe(2);
+  expect(f.calls()).toHaveLength(3);
+});
+
+test("only conductor Bash requests passing every guard can append authority and Pre never audits", () => {
+  for (const hook of guards) {
+    const f = claudeFixture(); const calls = instrument(f, { [hook]: { code: 2, stderr: "guard refused\n" } });
+    const result = f.invoke(f.claude("request")); expect(result.status).toBe(2); expect(result.stderr).toBe("guard refused\n");
+    expect(calls().map(({ hook }) => hook)).toEqual(guards.slice(0, guards.indexOf(hook) + 1)); expect(f.entries()).toEqual([]); expect(f.rows()).toEqual([]);
+  }
+  const f = claudeFixture();
+  for (const extra of [claudeCorpus.child, { agent_role: "foreign" }]) { expect(f.invoke({ ...f.claude("request"), ...extra }).status).toBe(0); expect(f.entries()).toEqual([]); }
+  expect(f.invoke(f.pre("Bash", { command: "ARTIFACT \0" })).status).toBe(2);
+  expect(f.at(f.claude("request"), f.now).status).toBe(0); expect(f.entries()).toMatchObject([{ path: f.artifact, atMs: f.now }]); expect(f.rows()).toEqual([]);
+});
+
+test("receipt extraction grants only literal in-boundary paths and ignores heredoc bodies and expansions", () => {
+  const f = claudeFixture(); const linked = join(dirname(f.artifact), "linked.md"); symlinkSync(f.artifact, linked);
+  for (const command of [`cat <<'EOF'\nARTIFACT ${f.artifact}\nEOF`, `printf 'ARTIFACT %s' "$TARGET"`, `printf 'ARTIFACT %s' '${join(f.project, "outside.md")}'`, `printf 'ARTIFACT %s' '${linked}'`, `cat <<$DELIMITER\nARTIFACT ${f.artifact}`]) {
+    expect(f.invoke(f.pre("Bash", { command })).status).toBe(0); expect(f.entries()).toEqual([]);
+  }
+  const spaced = join(dirname(f.artifact), "with spaces.md");
+  expect(f.at(f.claude("request", spaced), f.now).status).toBe(0);
+  expect(f.entries().map(({ path }) => path)).toEqual([spaced]); expect(existsSync(spaced)).toBe(false); expect(f.rows()).toEqual([]);
+});
+
+test("receipt storage refuses relative homes, corrupt schemas, unsafe files and live contention without repair", () => {
+  const f = claudeFixture();
+  expect(f.invoke(f.claude("request"), { env: { KIROCREW_HOME: "relative" } }).status).toBe(2); expect(existsSync(f.path)).toBe(false);
+  for (const raw of ["{", "{}\n", JSON.stringify({ path: f.artifact, atMs: -1, commandHash: hash }), "x".repeat(1024 * 1024 + 1)]) {
+    mkdirSync(dirname(f.path), { recursive: true }); writeFileSync(f.path, raw);
+    expect(f.invoke(f.claude("request")).status).toBe(2); expect(readFileSync(f.path, "utf8")).toBe(raw);
+  }
+  rmSync(f.path); symlinkSync(f.artifact, f.path); const bytes = readFileSync(f.artifact);
+  expect(f.invoke(f.claude("request")).status).toBe(2); expect(readFileSync(f.artifact)).toEqual(bytes); rmSync(f.path); mkdirSync(f.path);
+  expect(f.invoke(f.claude("request")).status).toBe(2); rmSync(f.path, { recursive: true });
+  const lock = runWithOwnerStampedLock(`${f.path}.lock`, 0, 0, () => {
+    const result = f.invoke(f.claude("request")); expect(result.status).toBe(2); expect(result.stderr).toContain("lock contended"); expect(existsSync(f.path)).toBe(false);
+  }); expect(lock.acquired).toBe(true);
+});
+
+test("receipt capacity admits 256 paths and persists expiry even when the next append refuses", () => {
+  const f = claudeFixture(); const paths = Array.from({ length: 256 }, (_, i) => join(dirname(f.artifact), `artifact-${i}.md`));
+  const command = `printf 'ARTIFACT %s' ${paths.map((path) => `'${path}'`).join(" ")}`;
+  expect(f.at(f.pre("Bash", { command }), f.now).status).toBe(0); expect(f.entries()).toHaveLength(256);
+  expect(statSync(f.path).mode & 0o777).toBe(0o600); expect(statSync(dirname(f.path)).mode & 0o777).toBe(0o700);
+  const pending = f.entries(); f.seed([{ ...pending[0], atMs: f.now - 600001 }, ...pending]);
+  const denied = f.at(f.claude("request"), f.now); expect(denied.status).toBe(2); expect(denied.stderr).toContain("256 pending"); expect(f.entries()).toEqual(pending);
+  expect(statSync(f.path).mode & 0o777).toBe(0o600);
+  f.seed([{ ...pending[0], atMs: f.now - 600001 }, { ...pending[1], atMs: f.now - 600000 }]);
+  expect(f.at(f.claude("receipt"), f.now).stderr).toContain("prior unconsumed"); expect(f.entries()).toEqual([{ ...pending[1], atMs: f.now - 600000 }]);
+});
+
+test("byte-identical requests coalesce through 2000 milliseconds and retain earliest arrival", () => {
+  const f = claudeFixture(); const request = f.claude("request");
+  expect(f.at(request, f.now).status).toBe(0); const first = f.entries()[0];
+  expect(f.at(request, f.now + 2000).status).toBe(0); expect(f.entries()).toEqual([first]);
+  expect(f.at(request, f.now - 1).status).toBe(0); expect(f.entries()).toEqual([{ ...first, atMs: f.now - 1 }]);
+  expect(f.at(request, f.now + 2000).status).toBe(0); expect(f.entries()).toHaveLength(2);
+  expect(f.entries().map(({ atMs }) => atMs)).toEqual([f.now - 1, f.now + 2000]); expect(f.rows()).toEqual([]);
+});
+
+test("newest prior request wins regardless of append order, leaving older and future entries pending", () => {
+  const f = claudeFixture(); f.authorization();
+  expect(f.at(f.claude("request"), f.now).status).toBe(0); const first = f.entries()[0];
+  expect(f.at(f.claude("request"), f.now + 2001).status).toBe(0); const newest = f.entries()[1];
+  const future = { ...first, atMs: f.now + 10000 }; f.seed([future, newest, first]); f.fresh(f.now + 3000);
+  expect(f.at(f.claude("receipt"), f.now + 3000).stderr).toBe(""); expect(f.entries()).toEqual([future, first]); expect(f.rows()).toHaveLength(1);
+  expect(f.at(f.claude("receipt"), f.now + 3000).stderr).toBe(""); expect(f.entries()).toEqual([future]); expect(f.rows()).toHaveLength(2);
+  expect(f.at(f.claude("receipt"), f.now + 3000).stderr).toContain("prior unconsumed"); expect(f.rows()).toHaveLength(2);
+});
+
+test("independent paths consume per entry and a foreign session cannot consume the conductor request", () => {
+  const f = claudeFixture(); f.authorization(); const other = join(dirname(f.artifact), "other.md");
+  for (const file of [f.artifact, other]) expect(f.at(f.claude("request", file), f.now).status).toBe(0);
+  f.fresh(f.now, f.artifact); f.fresh(f.now, other); const before = f.entries();
+  expect(f.at({ ...f.claude("receipt"), parent_session_key: "dashboard:other" }, f.now).stderr).toContain("prior unconsumed"); expect(f.entries()).toEqual(before);
+  expect(f.at(f.claude("receipt", other), f.now).stderr).toBe(""); expect(f.entries().map(({ path }) => path)).toEqual([f.artifact]);
+  expect(f.at(f.claude("receipt"), f.now).stderr).toBe(""); expect(f.entries()).toEqual([]); expect(f.rows()).toHaveLength(2);
+  expect(f.at(f.claude("receipt"), f.now).stderr).toContain("prior unconsumed"); expect(f.rows()).toHaveLength(2);
+});
+
+test("Claude receipt grammar drops titled, child, foreign-role and malformed fenced Posts without consuming", () => {
+  const f = claudeFixture(); expect(f.at(f.claude("request"), f.now).status).toBe(0); const before = f.entries();
+  const bad: Payload[] = [
+    ...[claudeCorpus.child, { agent_role: "foreign" }, { tool_name: "Bash" }, { tool_name: "Write requirements.md" }].map((extra) => ({ ...f.claude("receipt"), ...extra })),
+    ...claudeCorpus.invalidOutputs.map((output) => ({ ...f.claude("receipt"), tool_response: { output: output.replaceAll("{{ARTIFACT}}", f.artifact) } })),
+  ];
+  for (const payload of bad) { const result = f.at(payload, f.now); expect(result.status).toBe(0); expect(result.stderr).toContain("advisory"); expect(f.entries()).toEqual(before); expect(f.rows()).toEqual([]); }
+});
+
+test("receipt freshness rechecks request and authorization floors plus the actual file boundary", () => {
+  const f = claudeFixture(); f.authorization(); expect(f.at(f.claude("request"), f.now).status).toBe(0); const pending = f.entries();
+  for (const fault of ["stale-request", "stale-authorization", "missing", "directory", "link", "outside"]) {
+    f.fresh(f.now); f.authorization(); f.seed(pending);
+    if (fault === "stale-request") utimesSync(f.artifact, (f.now - 1) / 1000, (f.now - 1) / 1000);
+    if (fault === "stale-authorization") f.authorization(new Date(f.now + 1000).toISOString());
+    if (["missing", "directory", "link"].includes(fault)) rmSync(f.artifact);
+    if (fault === "directory") mkdirSync(f.artifact);
+    if (fault === "link") symlinkSync(f.adapter, f.artifact);
+    const outside = join(f.project, "outside.md");
+    if (fault === "outside") { writeFileSync(outside, "foreign"); f.seed([{ ...pending[0], path: outside }]); }
+    const result = f.at(f.claude("receipt", fault === "outside" ? outside : f.artifact), f.now);
+    expect(result.status).toBe(0); expect(result.stderr).toContain("advisory"); expect(f.rows()).toEqual([]); expect(f.entries()).toHaveLength(1);
+    rmSync(f.artifact, { force: true, recursive: true });
+  }
+  f.seed(pending); f.authorization(new Date(f.now).toISOString()); f.fresh(f.now);
+  expect(f.at(f.claude("receipt"), f.now).stderr).toBe(""); expect(f.rows()).toHaveLength(1); expect(f.entries()).toEqual([]);
+});
+
+test("failed or rejected Posts consume prior requests before title admission but exclude future and child Posts", () => {
+  const f = claudeFixture(); expect(f.at(f.claude("request"), f.now).status).toBe(0); const first = f.entries()[0];
+  const future = { ...first, atMs: f.now + 1000 };
+  for (const name of ["failure", "rejection"] as const) {
+    f.seed([first, future]);
+    expect(f.at({ ...f.claude(name), ...claudeCorpus.child }, f.now).status).toBe(0); expect(f.entries()).toEqual([first, future]);
+    const result = f.at(f.claude(name), f.now); expect(result.status).toBe(0); expect(result.stderr).toContain("consumed-failed"); expect(f.entries()).toEqual([future]); expect(f.rows()).toEqual([]);
+  }
+  f.seed([first]);
+  expect(f.at({ ...f.claude("receipt"), tool_response: { output: `\`\`\`console\nExit code 1\nARTIFACT ${f.artifact}\n\`\`\`` } }, f.now).stderr).toContain("consumed-failed");
+  expect(f.entries()).toEqual([]); expect(f.rows()).toEqual([]);
+});
+
+test("fresh Claude receipt consumes before real audit stamping and lost emission cannot replay", () => {
+  const f = claudeFixture(); const auth = f.authorization();
+  expect(f.at(f.claude("request"), f.now).status).toBe(0); f.fresh(f.now);
+  expect(f.at(f.claude("receipt"), f.now).stderr).toBe(""); expect(f.entries()).toEqual([]);
+  expect(f.rows()).toHaveLength(1); expect(auditBlockField(f.rows()[0].block, "Summary Authorization Id")).toBe(auth.id);
+  expect(auditBlockField(f.rows()[0].block, "File")).toBe(`<project-dir>/${relative(f.project, f.artifact).replaceAll("\\", "/")}`);
+  expect(f.at(f.claude("request"), f.now + 3000).status).toBe(0); f.fresh(f.now + 3000);
+  writeFileSync(join(f.tree, "hooks/aidlc-write-audit-log.ts"), "process.exit(1)");
+  expect(f.at(f.claude("receipt"), f.now + 3000).stderr).toContain("failed (exit 1)"); expect(f.entries()).toEqual([]);
+  expect(f.at(f.claude("receipt"), f.now + 3000).stderr).toContain("prior unconsumed"); expect(f.rows()).toHaveLength(1);
+});
+
+test("real Claude guard denial cannot leave a Bash receipt request behind", () => {
+  const f = postFixture(); f.env.AIDLC_CREW_BACKEND = "claude";
+  const command = `bun .kiro-crew/tools/aidlc-state.ts approve user-stories; printf 'ARTIFACT %s' '${f.artifact}'`;
+  const result = f.invoke(f.pre("Bash", { command })); expect(result.status).toBe(2); expect(result.stderr).toMatch(/cannot be changed|only.*workflow/i);
+  expect(existsSync(join(f.home, "apps/aidlc/data/receipts", `${hash}.jsonl`))).toBe(false); expect(f.rows()).toEqual([]);
 });

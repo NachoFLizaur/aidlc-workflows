@@ -210,6 +210,14 @@ hooks, and MCP transport. Keep registration and operator trust separate from
 project configuration. Report permission-request enforcement separately from
 advisory notification handling, and leave unsupported events unregistered.
 
+For Crew's Claude backend, configuration and version observations are not proof
+of per-session behavior. The entry corroborates provider records and stored
+bindings before selecting a hook grammar; unknown/conflicting observations
+refuse guarded Pre calls and suppress Post audit rows. Children need an explicit
+persona-first brief, own-key parent-project bind, and current-run ACK/Read check.
+These conductor checks do not enforce native delegation denial or passive-read
+scope. Document [backend limits](../guide/harnesses/kiro-crew.md#claude-code-backend), not just tool availability.
+
 Structural divergence a declarative row can't express is `emit.ts` — a plugin
 the manifest references that the packager calls with an `EmitContext`
 (`repoRoot`, `coreRoot`, `harnessRoot`, `harnessName`, `distRoot`,
