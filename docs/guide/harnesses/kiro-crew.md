@@ -14,7 +14,8 @@ registration, and hook activation are separate steps.
 **Kiro CLI is the default supported backend.** Crew is the host; the backend
 supplies the model session. **Claude Code has limited support** for conductor
 and distinct-directory child sessions; read [its operating limits](#claude-code-backend)
-before starting. Other backends and Slack are not supported here.
+before starting. **[Codex is not supported as a Crew backend](#codex-backend)**;
+the native Codex CLI harness is unaffected. Other backends and Slack are not supported here.
 
 Configure and authenticate the backend through Crew. `agent.acp_backend`
 selects the global backend; `agent.member_acp_backend` is a separate member-DM
@@ -313,6 +314,23 @@ context restricted and inspect changes; after-the-fact integrity checks are not
 prevention. See the [receipt contract](../../reference/06-hooks-and-tools.md#kiro-crew-hook-contract)
 for expiry, capacity, duplicate-delivery, and misattribution limits.
 
+## Codex backend
+
+**Codex is not supported as a Crew backend.** Through Crew, AI-DLC cannot
+intercept Codex tool permissions or identify the calling conversation.
+
+With `agent.acp_backend=codex`, setup refuses every command except diagnostic
+`status` before setup writes; status and doctor report a backend failure.
+A member-DM-only Codex selection warns instead. When Codex is observed for a
+conversation, MCP calls refuse before binding or engine execution, participating
+`PreToolUse` hooks refuse, and `PostToolUse` emits a diagnostic without an audit row.
+Version checks do not lift the refusal.
+
+Stop work. Choose Kiro CLI or [Claude Code with its limits](#claude-code-backend)
+in Crew yourself, then rerun setup and doctor. Do not bypass a refusal through
+another tool or transport. The [native Codex CLI harness](codex-cli.md) remains
+supported and is unaffected; use its own setup to run Codex outside Crew.
+
 ## Update and removal
 
 Update between workflows with Crew and other writers stopped. Obtain the new
@@ -350,6 +368,7 @@ See [lifecycle ownership](../18-install-and-lifecycle.md#root-integrations-and-o
 | Claude project collision | Resolve the named project files yourself or use a clean project; setup never repairs Claude configuration |
 | Missing Claude artifact audit row | Check the prior permission request, receipt grammar, freshness, and ledger limits; do not fabricate evidence |
 | Claude child MCP or delivery unavailable | Stop; check distinct authorized cwd, own-key parent-project bind, and fresh ACK/persona Read rather than using shell fallback |
+| Codex backend refused | Stop and follow [Codex backend alternatives](#codex-backend); setup never switches backends for you |
 
 ## Other harnesses
 

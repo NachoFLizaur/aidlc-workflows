@@ -173,6 +173,8 @@ If a Task tool call fails (timeout, error, or returns truncated/incomplete outpu
 
 ### Kiro Crew
 
+On Codex, stop: this Crew backend is blocked because Crew does not let AI-DLC intercept Codex tool permissions or identify the calling conversation. Do not dispatch, create artifacts or use another transport as a workaround. See docs/guide/harnesses/kiro-crew.md#codex-backend.
+
 **Pipeline receipt rule:** after each successful link, classify/correlate its completion envelope, settle transport, then run `{{INVOKE}} engine log link --stage "<directive.stage>" --link "<agent>"` BEFORE the next dispatch. Preserve declared order, `directive.pipeline.completed` recovery, `--repo "<repo>"`, `--single` and stage-specific handoff evidence. Link names are engine slugs, not Crew dispatch names.
 
 **Task-carried bootstrap.** Every lead, pipeline link and support follows `delegation.md` §2's child brief template in order: role, absolute persona-first read, engine path, explicit ensemble/main protocol reads, ordered active-rule pointers, task and ACK. Carry `stage_file`, authorized knowledge/context, ceremony, unit/repo and ownership. Explicit ordered reads override assumed resource delivery and pasted-bundle wording without dropping rules. Claude uses a distinct authorized launch cwd and parent-project bind before engine operations through `aidlc_engine` argv. Apply §4 delivery verification after settlement but BEFORE pipeline link receipts or integration. Continuation passes the same explicit agent, compact child header, ordered pointers, Claude bind/argv and fresh ACK. Initial/continued tasks are at most 5,000 characters; missing bootstrap evidence stops without silent retry or dependent release.

@@ -61,16 +61,19 @@ function doctorFixture() {
   json(join(f.home, "hooks.json"), { hooks });
    const key = "dashboard:doctor"; json(join(f.home, "session_map.json"), { [key]: { cwd: f.project, provider: "acp" } });
   const binding = bindCrewSession(f.home, f.project, key); const session = `crew-${binding.keyHash}`;
-  const run = (env: NodeJS.ProcessEnv = {}, preload?: string) => {
-    const result = spawnSync(process.execPath, [...(preload ? ["--preload", preload] : []), join(f.project, ".kiro-crew/tools/aidlc.ts"), "--doctor", "--json", "--offline"], {
+  const invokeDoctor = (args: string[], env: NodeJS.ProcessEnv = {}, preload?: string) => {
+    const result = spawnSync(process.execPath, [...(preload ? ["--preload", preload] : []), join(f.project, ".kiro-crew/tools/aidlc.ts"), "--doctor", "--offline", ...args], {
       cwd: f.project, env: { ...f.env, ...env }, encoding: "utf8", timeout: remainingOperationTimeoutMs(NATIVE_FIXTURE_SETUP_TIMEOUT_MS), maxBuffer: 8 * 1024 * 1024,
     });
-    expect(result.error).toBeUndefined();
+    expect(result.error).toBeUndefined(); return result;
+  };
+  const run = (env: NodeJS.ProcessEnv = {}, preload?: string) => {
+    const result = invokeDoctor(["--json"], env, preload);
     const checks = (JSON.parse(result.stdout).data.checks as { label: string; pass: boolean; severity?: string }[]).filter(({ label }) => label.startsWith("Crew integration — "));
     const row = (name: string) => { const found = checks.find(({ label }) => label.startsWith(`Crew integration — ${name}:`)); expect(found, result.stdout).toBeDefined(); return found!; };
     return { ...result, checks, row };
   };
-  return { ...f, key, session, binding, hooks, doctor: run };
+  return { ...f, key, session, binding, hooks, doctor: run, humanDoctor: (env: NodeJS.ProcessEnv = {}, preload?: string) => invokeDoctor(["--verbose"], env, preload) };
 }
 
 test("status and trust are read-only pending reports on an unconfigured project", () => {
@@ -292,7 +295,7 @@ function selectClaude(f: Fixture, global = "claude", member = "claude") {
 test("setup and doctor resolve replacing backend axes without normalizing invalid selections", () => {
   const f = doctorFixture(); const base = JSON.parse(read(f.config)); const local = join(f.home, "config.local.json");
   for (const [axes, expected] of [
-    [{}, "ok"], [{ acp_backend: "claude" }, "warn"], [{ acp_backend: "kas" }, "warn"], [{ acp_backend: "codex" }, "warn"],
+    [{}, "ok"], [{ acp_backend: "claude" }, "warn"], [{ acp_backend: "kas" }, "warn"], [{ acp_backend: "codex" }, "fail"],
     [{ acp_backend: "kiro-cli" }, "fail"], [{ acp_backend: "unknown" }, "fail"], [{ acp_backend: false }, "fail"], [{ member_acp_backend: null }, "fail"],
   ] as const) {
     json(f.config, { ...base, agent: { ...base.agent, ...axes } }); const before = f.owned();
@@ -431,4 +434,110 @@ test("whole-map composition limits admit 10000 records and warn on overflow, mal
     const row = setupRow(f.run("status", ["--project-dir", f.project], env).report, "Crew composition"); expect(row.status).toBe(status);
     expect(f.doctor(env).row("Crew composition").severity === "warn").toBe(status === "warn"); expect(f.owned()).toEqual(before);
   }
+});
+
+// Simulate only executable version observations. In mutator tests any other
+// subprocess or Claude collision inspection records an attempt and fails; the
+// real CLI still owns config resolution, admission, reporting and all writes.
+function codexRuntime(f: Fixture, mutator = false) {
+  const host = versionExecutables(f, ["kirocrew", "bun", "claude", "node", "aidlc"], `'kirocrew '+(process.env.FIXTURE_CREW_VERSION||'99.0.0')`);
+  const collision = join(f.root, "collision-attempt"); const preload = join(f.root, "backend-runtime.ts");
+  writeFileSync(preload, `import {mock} from 'bun:test';import * as cp from 'node:child_process';import * as fs from 'node:fs';const spawn=cp.spawnSync,lstat=fs.lstatSync;
+    if(${mutator})mock.module('node:child_process',()=>({...cp,spawnSync:(command,args,options)=>{if(args?.length!==1||args[0]!=='--version'){fs.appendFileSync(${JSON.stringify(host.trace)},JSON.stringify({command,args})+'\\n');throw new Error('unexpected subprocess');}return spawn(command,args,options);}}));
+    if(${mutator})mock.module('node:fs',()=>({...fs,lstatSync:(path,...args)=>{if([${JSON.stringify(join(f.project, ".claude"))},${JSON.stringify(join(f.project, "CLAUDE.md"))}].includes(path)){fs.writeFileSync(${JSON.stringify(collision)},String(path));throw new Error('unexpected collision inspection');}return lstat(path,...args);}}));`);
+  return { ...host, preload, collision };
+}
+function codexDiagnostic(text: string) {
+  expect(text).toContain("Codex is not supported as a Kiro Crew backend");
+  expect(text).toContain("intercept Codex tool permissions or identify the calling conversation");
+  expect(text).toContain("Choose Kiro CLI or Claude Code with its documented limits in Crew, then rerun setup and doctor.");
+  expect(text).toContain("Version changes do not bypass this refusal.");
+  expect(text).toContain("docs/guide/harnesses/kiro-crew.md#codex-backend");
+  expect(text).toContain("The native Codex CLI harness is unaffected.");
+}
+
+test("effective global Codex refuses every setup command before writes, collision inspection or host mutation", () => {
+  for (const installed of [false, true]) {
+    const f = fixture(); if (installed) f.install(); else f.grant();
+    selectClaude(f, installed ? "claude" : "codex", "claude");
+    if (installed) json(join(f.home, "config.local.json"), { agent: { acp_backend: "codex", subagent_cwd_allowed_roots: [] } });
+    const key = "dashboard:blocked-setup"; json(join(f.home, "session_map.json"), { [key]: { provider: "codex", cwd: f.project } });
+    writeFileSync(join(f.project, "CLAUDE.md"), "operator-owned instructions");
+    json(join(f.home, "hooks.json"), { hooks: [{ id: "foreign", command: "operator-command" }] });
+    const host = codexRuntime(f, true); const before = f.owned();
+    const commands: [string, string[]][] = [
+      ["project", projectArgs(f)], ["project", [...projectArgs(f), "--apply-local"]], ["project", ["--project-dir", f.project, "--native"]],
+      ["hooks", []], ["hooks", ["--apply", "--gateway-stopped"]], ["app", []], ["app", ["--apply"]], ["trust", []],
+      ["bind", ["--project-dir", f.project, "--session-key", key]],
+    ];
+    for (const [command, args] of commands) {
+      const result = f.run(command, args, host.env, host.preload); expect(result.status, command).toBe(1);
+      expect(result.report.rows).toHaveLength(1); expect(setupRow(result.report, "Backend selection").status).toBe("fail"); codexDiagnostic(result.report.rows[0].detail);
+      expect(result.report.changed).toEqual([]); expect(f.owned(), command).toEqual(before); expect(existsSync(host.collision)).toBe(false);
+    }
+    expect(host.calls().length).toBeGreaterThan(0);
+    for (const call of host.calls()) expect(call.args).toEqual(["--version"]);
+    expect(existsSync(join(f.project, ".kiro-crew"))).toBe(false); expect(existsSync(join(f.paths.appRoot, "data/bindings"))).toBe(false);
+  }
+});
+
+test("setup and doctor keep global Codex failed and member-only Codex advisory across overlays and versions", () => {
+  const f = doctorFixture(); const base = JSON.parse(read(f.config)); const local = join(f.home, "config.local.json"); const host = codexRuntime(f);
+  writeFileSync(join(f.project, "CLAUDE.md"), "operator instructions");
+  const cases = [
+    { base: "codex", local: undefined, member: "claude", status: "fail", version: "0.6.0" },
+    { base: "", local: "codex", member: "claude", status: "fail", version: "99.0.0" },
+    { base: "codex", local: "", member: "codex", status: "warn", version: "99.0.0" },
+    { base: "codex", local: "", member: "kas", status: "ok", version: "99.0.0" },
+  ];
+  for (const item of cases) {
+    json(f.config, { ...base, agent: { ...base.agent, acp_backend: item.base, member_acp_backend: item.member } });
+    rmSync(local, { force: true }); if (item.local !== undefined) json(local, { agent: { acp_backend: item.local } });
+    const before = f.owned(); const env = { ...host.env, FIXTURE_CREW_VERSION: item.version };
+    const status = f.run("status", ["--project-dir", f.project], env, host.preload); const doctor = f.doctor(env, host.preload);
+    const row = setupRow(status.report, "Backend selection"); const check = doctor.row("Backend");
+    expect(row.status).toBe(item.status); expect(check.pass).toBe(item.status === "ok"); expect(check.severity === "warn").toBe(item.status === "warn");
+    expect(status.status).toBe(item.status === "fail" ? 1 : 0); expect(doctor.status).toBe(item.status === "fail" ? 1 : 0);
+    for (const detail of [row.detail, check.label]) { expect(detail).toContain(`Crew: ${item.version}`); if (item.status !== "ok") codexDiagnostic(detail); }
+    if (item.status === "fail") {
+      expect(setupRow(status.report, "Claude project collision")).toMatchObject({ status: "ok", detail: "not evaluated (global codex blocked; see Backend row)" });
+      expect(doctor.row("Claude project collision")).toMatchObject({ pass: true }); expect(doctor.row("Claude project collision").label).toContain("not evaluated (global codex blocked");
+    } else if (item.status === "warn") expect(row.detail).toContain("member-DM only; not delegated-child selection");
+    expect(status.report.changed).toEqual([]); expect(f.owned()).toEqual(before);
+  }
+});
+
+test("Codex config and provider observations take warning-only composition precedence in both reporters", () => {
+  const f = doctorFixture(); const base = JSON.parse(read(f.config)); const host = codexRuntime(f);
+  for (const item of [
+    { global: "codex", member: "claude", providers: ["acp", "claude_code"], backend: "fail" },
+    { global: "", member: "codex", providers: ["acp"], backend: "warn" },
+    { global: "", member: "kas", providers: ["codex"], backend: "ok" },
+    { global: "claude", member: "claude", providers: ["claude_code", "codex", "acp"], backend: "warn" },
+  ]) {
+    json(f.config, { ...base, agent: { ...base.agent, acp_backend: item.global, member_acp_backend: item.member } });
+    json(join(f.home, "session_map.json"), Object.fromEntries(item.providers.map((provider, i) => [i ? `dashboard:other-${i}` : f.key, { provider, cwd: f.project }])));
+    const before = f.owned(); const env = { ...host.env, AIDLC_SESSION_OVERRIDE: f.session };
+    const status = f.run("status", ["--project-dir", f.project], env, host.preload); const doctor = f.doctor(env, host.preload);
+    expect(setupRow(status.report, "Backend selection").status).toBe(item.backend);
+    const row = setupRow(status.report, "Crew composition"); const check = doctor.row("Crew composition");
+    expect(row.status).toBe("warn"); expect(check).toMatchObject({ pass: false, severity: "warn" });
+    for (const detail of [row.detail, check.label]) {
+      expect(detail).toContain("blocked: codex selected or recorded"); expect(detail).not.toContain("mixed backend configuration"); expect(detail).not.toContain("consistent backend configuration");
+      expect(detail).toContain(`current session provider: ${item.providers[0]}`); expect(detail).not.toContain(f.key);
+    }
+    expect(f.owned()).toEqual(before);
+  }
+});
+
+test("human doctor renders Codex failure and guide pointer without relaying diagnostic control characters", () => {
+  const f = doctorFixture(); selectClaude(f, "codex", "kas"); const host = codexRuntime(f); const before = f.owned();
+  const structured = f.doctor(host.env, host.preload); const human = f.humanDoctor(host.env, host.preload);
+  expect(structured.status).toBe(1); expect(human.status).toBe(1); codexDiagnostic(human.stdout);
+  expect(structured.row("Backend").label).toContain("unaffected.\n  See docs/guide/harnesses/kiro-crew.md#codex-backend\n  Observations");
+  const line = human.stdout.split("\n").find((line) => line.includes("Crew integration — Backend:"));
+  expect(line).toBeDefined(); expect(line).toContain("fail");
+  expect(line).toContain("unaffected.?  See docs/guide/harnesses/kiro-crew.md#codex-backend?  Observations");
+  expect(line).not.toContain("\r"); expect(line).not.toContain("\t"); expect(line).not.toContain("\u001b");
+  expect(f.owned()).toEqual(before);
 });

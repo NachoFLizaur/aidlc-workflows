@@ -273,16 +273,18 @@ export function crewSubagentProject(home: string, project: string, key: string):
   return canonical;
 }
 
-/** Read replacing backend selections per report and before project/bind collision
- * checks. Unknown axes fail; the global axis sets known-selection severity, while
- * member-DM selection describes no child inheritance. Runtime observations never
- * grant admission, change selection or disable guards. Core keeps its own twin. */
+/** Read base + replacing local backend selections before CLI writes and collision
+ * inspection. Global Codex fails and stops every mutating command; member-DM
+ * Codex warns, not a delegated-child selection. Unknown axes fail; Claude/KAS
+ * retain their severity. Runtime observations never clear refusal or switch the
+ * backend; no bypass. Operators must exclude concurrent config writers: this is
+ * a snapshot, not a lock. Core keeps its own reporting twin. */
 export function backend(home: string, effective = effectiveAgent(home).effective) {
   const backendSupport = {
     "kiro-cli": "Kiro CLI backend",
     claude: "limited support: conductor and distinct-directory child sessions; file-tool write provenance, native delegation denial and running-child steering are not supported; see guide §Claude backend",
     kas: "not supported by this integration",
-    codex: "not supported by this integration",
+    codex: "Codex is not supported as a Kiro Crew backend: Crew does not let AI-DLC intercept Codex tool permissions or identify the calling conversation. Choose Kiro CLI or Claude Code with its documented limits in Crew, then rerun setup and doctor. Version changes do not bypass this refusal. The native Codex CLI harness is unaffected.",
   };
   const axis = (value: unknown, fallback: string) => {
     const selected = value === undefined ? fallback : value;
@@ -294,8 +296,9 @@ export function backend(home: string, effective = effectiveAgent(home).effective
   };
   const global = axis(effective.acp_backend, "");
   const member = axis(effective.member_acp_backend, "kas");
-  const status: "ok" | "warn" | "fail" = global.name === "unrecognized" || member.name === "unrecognized" ? "fail" : global.name === "kiro-cli" ? "ok" : "warn";
-  const detail = `agent.acp_backend=${global.detail}; agent.member_acp_backend=${member.detail} (member-DM only; not delegated-child selection)`;
+  const status: "ok" | "warn" | "fail" = global.name === "codex" || global.name === "unrecognized" || member.name === "unrecognized" ? "fail" : global.name === "kiro-cli" && member.name !== "codex" ? "ok" : "warn";
+  const axes = `agent.acp_backend=${global.detail}; agent.member_acp_backend=${member.detail} (member-DM only; not delegated-child selection)`;
+  const detail = `${global.name === "codex" ? backendSupport.codex : axes}${global.name === "codex" || member.name === "codex" ? "\n  See docs/guide/harnesses/kiro-crew.md#codex-backend" : ""}`;
   return { global: global.name, member: member.name, status, detail, observations: backendRuntime(home, global.name === "claude" || member.name === "claude") };
 }
 
@@ -304,7 +307,9 @@ export function backend(home: string, effective = effectiveAgent(home).effective
  * shares a provider family, not support. Unknown labels collapse without printing
  * keys; current identity is override/env only, never parent/project inference.
  * Missing current records, malformed data or mixed families warn and keep the
- * conductor's preflight hold. No writes, live-process proof or bypass. */
+ * conductor's preflight hold. Codex selection or records take blocked precedence
+ * over mixed/consistent classification; this row warns, while Backend owns the
+ * global-selection failure. No writes, live-process proof or bypass. */
 export function crewComposition(home: string, selection: Pick<ReturnType<typeof backend>, "global" | "member">): Row {
   const family = (name: string) => name === "kiro-cli" || name === "kas" ? "kiro-family" : name;
   const providerFamily = (label: string) => label === "acp" || label === "kiro" || label === "kas" ? "kiro-family" : label === "claude_code" ? "claude" : label === "codex" ? "codex" : "unrecognized";
@@ -331,6 +336,7 @@ export function crewComposition(home: string, selection: Pick<ReturnType<typeof 
   const recordNote = mapIssue || (entries ? `${entries} session records observed (labels only; not live process verification)` : "no session records observed; classification from config only");
   const currentNote = !current ? "current session not selected" : currentLabel ? `current session provider: ${currentLabel}` : "current session provider unverified (no matching map entry; no parent-backend inference)";
   const notes = `${observed}; ${recordNote}; ${currentNote}; unrecorded children are not verified`;
+  if (selection.global === "codex" || selection.member === "codex" || families.has("codex")) return { what: "Crew composition", status: "warn", detail: `blocked: codex selected or recorded; see the Backend row for compatibility; ${notes}` };
   const reasons: string[] = [];
   const known = selection.global !== "unrecognized" && selection.member !== "unrecognized";
   if (known && family(selection.global) !== family(selection.member)) reasons.push(`member-DM selection is a separate axis (member_acp_backend=${selection.member}, agent.acp_backend=${selection.global}); member-DM sessions can dispatch children on ${selection.global}`);
@@ -389,7 +395,8 @@ function backendRuntime(home: string, claude: boolean): string[] {
  * bounded reads inspect seed/engine markers, never traverse non-directory .claude.
  * availableModels-only JSON is a warning heuristic, not ownership proof. Global
  * ~/.claude is existence-only. Fail stops project/bind; status reports; warnings
- * do not refuse setup. Disabled only when neither effective axis is Claude.
+ * do not refuse setup. Disabled when neither effective axis is Claude; the CLI
+ * also skips inspection when global Codex is blocked, before calling this helper.
  * No bypass or repair; this snapshot does not guard direct MCP/live hook writes.
  * Stop competing writers and recheck. Core maintains an independent twin. */
 export function claudeProjectCollision(project: string, selection: Pick<ReturnType<typeof backend>, "global" | "member">, home = process.env.HOME || homedir()): Row {
@@ -988,10 +995,20 @@ function main() {
   let json = process.argv.includes("--json");
   try {
     const o = parse(process.argv.slice(2)); json = o.json;
+    // Read effective config before any setup write or collision inspection,
+    // including app/hooks --apply. Global Codex exits 1 without switching config;
+    // only status continues read-only diagnostics. No bypass.
+    const effective = effectiveAgent(o.home).effective;
+    if (effective.acp_backend === "codex" && o.command !== "status") {
+      observeBackend(o, report, effective);
+      print(report, json); process.exitCode = 1; return;
+    }
     if (["project", "status", "bind"].includes(o.command)) {
       // Observe before installer, cwd-root or binding writes; status stays read-only.
-      const selection = observeBackend(o, report)!;
-      const collision = claudeProjectCollision(o.project, selection);
+      const selection = observeBackend(o, report, effective)!;
+      const collision: Row = selection.global === "codex"
+        ? { what: "Claude project collision", status: "ok", detail: "not evaluated (global codex blocked; see Backend row)" }
+        : claudeProjectCollision(o.project, selection);
       report.rows.push(collision);
       if (o.command === "status") report.rows.push(crewComposition(o.home, selection));
       if (collision.status === "fail" && o.command !== "status") {

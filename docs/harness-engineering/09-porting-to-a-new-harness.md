@@ -218,6 +218,10 @@ persona-first brief, own-key parent-project bind, and current-run ACK/Read check
 These conductor checks do not enforce native delegation denial or passive-read
 scope. Document [backend limits](../guide/harnesses/kiro-crew.md#claude-code-backend), not just tool availability.
 
+Crew [refuses Codex](../guide/harnesses/kiro-crew.md#codex-backend) rather than accepting tool calls without permission interception or caller identity.
+Setup checks the global backend before writes; the bridge checks conversation records before binding or engine execution.
+This Crew-specific refusal leaves the native Codex CLI harness below unaffected.
+
 Structural divergence a declarative row can't express is `emit.ts` — a plugin
 the manifest references that the packager calls with an `EmitContext`
 (`repoRoot`, `coreRoot`, `harnessRoot`, `harnessName`, `distRoot`,

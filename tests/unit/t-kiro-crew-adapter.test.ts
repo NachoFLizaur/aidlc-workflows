@@ -3,20 +3,23 @@
 import { afterEach, expect, test, setDefaultTimeout } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { constants, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
+import { constants, cpSync, existsSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { basename, dirname, join, relative } from "node:path";
 import { pathToFileURL } from "node:url";
 import { auditBlockField, readAuditShardEvents, runWithOwnerStampedLock, summaryAuthorizationRecordPath, writeSessionBinding } from "../../core/tools/aidlc-lib.ts";
-import { boundCrewBackend, crewBackendFromRecords } from "../../harness/kiro-crew/hooks/aidlc-kiro-crew-hook-entry.ts";
+import { boundCrewBackend, crewBackendFromRecords, type CrewBackendObservation } from "../../harness/kiro-crew/hooks/aidlc-kiro-crew-hook-entry.ts";
 import { cleanupTestProject, createTestProject, REPO_ROOT, seededAuditShard, seededRecordDir, seedStateFile } from "../harness/fixtures.ts";
+import { connect, type RpcResponse } from "../harness/kiro-crew-live.ts";
 import { testGuardEnvironment } from "../harness/runner-profile.ts";
 import { NATIVE_FIXTURE_SETUP_TIMEOUT_MS, NATIVE_STARTUP_TIMEOUT_MS, remainingOperationTimeoutMs } from "../harness/test-budget.ts";
 import corpus from "../fixtures/kiro-crew/payloads.json";
 import claudeCorpus from "../fixtures/kiro-crew/claude-payloads.json";
+import codexCorpus from "../fixtures/kiro-crew/codex-payloads.json";
 
 setDefaultTimeout(NATIVE_FIXTURE_SETUP_TIMEOUT_MS);
 const roots: string[] = [];
-afterEach(() => { for (const root of roots.splice(0)) cleanupTestProject(root); });
+const clients: ReturnType<typeof connect>[] = [];
+afterEach(async () => { for (const client of clients.splice(0)) await client.close(); for (const root of roots.splice(0)) cleanupTestProject(root); });
 const key = corpus.spawn.parent_session_key;
 const hash = createHash("sha256").update(key).digest("hex");
 const session = `crew-${hash}`;
@@ -32,6 +35,7 @@ function fixture() {
   const entry = join(project, "kiro-crew-app/hooks/aidlc-kiro-crew-hook-entry.ts");
   const artifact = join(seededRecordDir(project), "inception/requirements-analysis/requirements.md");
   const env = testGuardEnvironment({ ...process.env, HOME: home, KIROCREW_HOME: home, AIDLC_PROJECT_DIR: project,
+    BUN_RUNTIME_TRANSPILER_CACHE_PATH: "0",
     CLAUDE_PROJECT_DIR: undefined, AIDLC_SESSION_OVERRIDE: undefined, AIDLC_SESSION_OVERRIDE_SOURCE: undefined,
     AIDLC_COMPILED_EXECUTABLE: undefined, KIROCREW_HOOK_EVENT: undefined, KIROCREW_HOOK_CONTEXT: undefined, AIDLC_UNATTENDED: undefined,
     AIDLC_HARNESS_NAME: "kiro-crew", AIDLC_HARNESS_DIR: ".kiro-crew", AIDLC_CREW_BACKEND: "kiro" }, "production");
@@ -350,15 +354,16 @@ function claudeFixture() {
 test("backend observations require the own provider and safe corroborating binding before import", () => {
   const f = fixture(); const map = join(f.home, "session_map.json");
   for (const [provider, backend] of claudeCorpus.providers) {
-    f.observe(String(backend), provider);
-    expect<string>(crewBackendFromRecords(f.home, key)).toBe(String(backend)); expect<string>(boundCrewBackend(f.home, f.project, key)).toBe(String(backend));
+    if (backend !== "kiro" && backend !== "claude" && backend !== "unknown") throw new Error("Invalid expected backend in payload fixture");
+    f.observe(backend, provider);
+    expect(crewBackendFromRecords(f.home, key)).toEqual({ backend }); expect(boundCrewBackend(f.home, f.project, key)).toEqual({ backend });
   }
   for (const path of [map, f.engineBinding]) for (const fault of ["missing", "foreign", "malformed", "oversize", "link", "directory"]) {
     f.observe(); rmSync(path);
     if (fault === "link") symlinkSync(f.adapter, path);
     else if (fault === "directory") mkdirSync(path);
     else if (fault !== "missing") writeFileSync(path, fault === "foreign" ? JSON.stringify({ foreign: { provider: "acp" } }) : fault === "oversize" ? " ".repeat(4 * 1024 * 1024 + 1) : "{");
-    expect(boundCrewBackend(f.home, f.project, key), `${path}:${fault}`).toBe("unknown"); rmSync(path, { recursive: true, force: true });
+    expect(boundCrewBackend(f.home, f.project, key), `${path}:${fault}`).toEqual({ backend: "unknown" }); rmSync(path, { recursive: true, force: true });
   }
   const marker = join(f.project, "backend.json");
   writeFileSync(f.adapter, `import {writeFileSync} from 'node:fs'; const backend=process.env.AIDLC_CREW_BACKEND; export function run(){writeFileSync(${JSON.stringify(marker)},JSON.stringify(backend));return 0;}`);
@@ -553,4 +558,174 @@ test("real Claude guard denial cannot leave a Bash receipt request behind", () =
   const command = `bun .kiro-crew/tools/aidlc-state.ts approve user-stories; printf 'ARTIFACT %s' '${f.artifact}'`;
   const result = f.invoke(f.pre("Bash", { command })); expect(result.status).toBe(2); expect(result.stderr).toMatch(/cannot be changed|only.*workflow/i);
   expect(existsSync(join(f.home, "apps/aidlc/data/receipts", `${hash}.jsonl`))).toBe(false); expect(f.rows()).toEqual([]);
+});
+
+// Include directories, link targets, file modes, bytes and mtimes: refusing a
+// call must not silently create routing state or rewrite an identical record.
+function snapshot(root: string, prefix = ""): Record<string, string> {
+  const result: Record<string, string> = {};
+  for (const entry of readdirSync(join(root, prefix), { withFileTypes: true })) {
+    const path = prefix ? `${prefix}/${entry.name}` : entry.name; const full = join(root, path);
+    if (entry.isDirectory()) { result[`${path}/`] = "directory"; Object.assign(result, snapshot(root, path)); }
+    else if (entry.isSymbolicLink()) result[path] = `link:${readlinkSync(full)}`;
+    else result[path] = `${statSync(full).mode}:${statSync(full).mtimeMs}:${createHash("sha256").update(readFileSync(full)).digest("hex")}`;
+  }
+  return result;
+}
+function codexReason(text: string) {
+  expect(text).toContain("Codex is not supported as a Kiro Crew backend");
+  expect(text).toContain("intercept Codex tool permissions or identify the calling conversation");
+  expect(text).toContain("Choose Kiro CLI or Claude Code with its documented limits in Crew, then rerun setup and doctor.");
+  expect(text).toContain("Version changes do not bypass this refusal.");
+  expect(text).toContain("docs/guide/harnesses/kiro-crew.md#codex-backend");
+  expect(text).toContain("The native Codex CLI harness is unaffected.");
+}
+function refused(response: RpcResponse) {
+  expect(response.error).toBeUndefined(); expect(response.result?.isError, JSON.stringify(response)).toBe(true);
+  codexReason(response.result!.content![0].text);
+}
+function bridgeFixture() {
+  const f = fixture(); const bridge = join(f.project, "kiro-crew-app/mcp/aidlc-mcp-bridge.ts");
+  const trace = join(f.project, "engine-calls.jsonl"); const engine = join(f.tree, "tools/aidlc.ts");
+  const engineBody = `import {appendFileSync,writeFileSync,mkdirSync} from 'node:fs';
+    appendFileSync(${JSON.stringify(trace)},JSON.stringify({args:process.argv.slice(2),backend:process.env.AIDLC_CREW_BACKEND,session:process.env.AIDLC_SESSION_OVERRIDE,project:process.env.AIDLC_PROJECT_DIR,compiled:process.env.AIDLC_COMPILED_EXECUTABLE})+'\\n');`;
+  writeFileSync(engine, `${engineBody} console.log('engine completed');`);
+  const execTrace = join(f.project, "exec-calls.jsonl"); const execSpy = join(f.project, "bridge-exec.ts");
+  writeFileSync(execSpy, `import {mock} from 'bun:test';import * as cp from 'node:child_process';import {appendFileSync} from 'node:fs';const exec=cp.execFile;mock.module('node:child_process',()=>({...cp,execFile:(command,args,options,callback)=>{appendFileSync(${JSON.stringify(execTrace)},JSON.stringify({command,args,backend:options.env.AIDLC_CREW_BACKEND})+'\\n');return exec(command,args,options,callback);}}));`);
+  const env = { ...f.env, KIROCREW_SESSION_KEY: key, AIDLC_CREW_BACKEND: "claude", AIDLC_COMPILED_EXECUTABLE: join(f.gateway, "never-execute") };
+  const tools: { name: string; arguments: Record<string, unknown> }[] = [{ name: "aidlc_bind_session", arguments: {} }, { name: "aidlc_status", arguments: {} }, { name: "aidlc_engine", arguments: { args: ["engine", "status"] } }];
+  const rpc = (requests = tools, overrides: NodeJS.ProcessEnv = {}, preload?: string) => {
+    const result = spawnSync(process.execPath, ["--preload", execSpy, ...(preload ? ["--preload", preload] : []), bridge, "mcp", "--crew-home", f.home], {
+      cwd: f.gateway, env: { ...env, ...overrides }, encoding: "utf8", input: `${requests.map((params, id) => JSON.stringify({ jsonrpc: "2.0", id, method: "tools/call", params })).join("\n")}\n`,
+      timeout: remainingOperationTimeoutMs(NATIVE_FIXTURE_SETUP_TIMEOUT_MS), maxBuffer: 4 * 1024 * 1024,
+    });
+    expect(result.error).toBeUndefined(); expect(result.status, result.stderr).toBe(0);
+    const responses = result.stdout.trim().split("\n").map((line) => JSON.parse(line) as RpcResponse); expect(responses).toHaveLength(requests.length); return responses;
+  };
+  const client = (overrides: NodeJS.ProcessEnv) => { const c = connect({ command: process.execPath, args: ["--preload", execSpy, bridge, "mcp", "--crew-home", f.home] }, f.gateway, { ...env, ...overrides }); clients.push(c); return c; };
+  const calls = () => existsSync(trace) ? readFileSync(trace, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [];
+  const execs = () => existsSync(execTrace) ? readFileSync(execTrace, "utf8").trim().split("\n").map((line) => JSON.parse(line)) : [];
+  return { ...f, bridge, engine, engineBody, trace, tools, rpc, client, calls, execs };
+}
+
+test("Codex observations retain their reason across stored conflicts and use the parent key before adapter import", () => {
+  const f = fixture(); const marker = join(f.project, "import-backend.json"); const blocked = { backend: "blocked", reason: "codex" } satisfies CrewBackendObservation;
+  writeFileSync(f.adapter, `import {writeFileSync} from 'node:fs';writeFileSync(${JSON.stringify(marker)},JSON.stringify({backend:process.env.AIDLC_CREW_BACKEND,session:process.env.AIDLC_SESSION_OVERRIDE}));export function run(){return 0;}`);
+  for (const row of codexCorpus.observations) {
+    f.observe(row.stored ?? "unknown", row.provider, row.backendConflict === undefined ? {} : { backendConflict: row.backendConflict });
+    if (row.stored === null) rmSync(f.engineBinding);
+    if (row.provider === "codex") expect(crewBackendFromRecords(f.home, key)).toEqual(blocked);
+    expect(boundCrewBackend(f.home, f.project, key), JSON.stringify(row)).toEqual(blocked);
+    expect(f.invoke({ ...f.payload("write"), ...claudeCorpus.child }, { entry: true, env: { AIDLC_CREW_BACKEND: "kiro" } }).status).toBe(0);
+    expect(JSON.parse(readFileSync(marker, "utf8"))).toEqual({ backend: "blocked", session });
+  }
+  const map = join(f.home, "session_map.json");
+  for (const fault of ["missing", "malformed", "link"]) {
+    f.observe("blocked"); rmSync(map);
+    if (fault === "malformed") writeFileSync(map, "{");
+    if (fault === "link") symlinkSync(f.engineBinding, map);
+    expect(crewBackendFromRecords(f.home, key)).toEqual({ backend: "unknown" }); expect(boundCrewBackend(f.home, f.project, key)).toEqual(blocked);
+    rmSync(map, { force: true });
+  }
+  const child = "subagent:backend-child";
+  for (const [parentProvider, childProvider, expected] of [["acp", "codex", "kiro"], ["codex", "acp", "blocked"]]) {
+    f.observe("kiro"); writeFileSync(map, JSON.stringify({ [key]: { provider: parentProvider }, [child]: { provider: childProvider } }));
+    expect(crewBackendFromRecords(f.home, child)).toEqual(childProvider === "codex" ? blocked : { backend: "kiro" });
+    expect(crewBackendFromRecords(f.home, "toString")).toEqual({ backend: "unknown" });
+    expect(f.invoke({ ...f.payload("write"), subagent_id: child }, { entry: true }).status).toBe(0);
+    expect(JSON.parse(readFileSync(marker, "utf8"))).toEqual({ backend: expected, session });
+  }
+});
+
+test("blocked hooks refuse before grammar or guards and leave receipts and audit untouched", () => {
+  const f = claudeFixture(); f.authorization(); f.fresh(); f.bind(); f.observe("blocked", "codex", { intent: basename(seededRecordDir(f.project)) }); f.env.AIDLC_CREW_BACKEND = "blocked";
+  f.seed([{ path: f.artifact, atMs: f.now, commandHash: hash }]);
+  const before = snapshot(f.project);
+  for (const entry of [false, true]) {
+    for (const fields of codexCorpus.pre) {
+      const data = JSON.parse(JSON.stringify(fields).replaceAll("{{ARTIFACT}}", f.artifact));
+      const result = f.invoke({ ...f.payload("write"), ...data, tool_input: data.tool_input }, { entry });
+      expect(result.status).toBe(2); codexReason(result.stderr);
+      expect(f.calls()).toEqual([]); expect(snapshot(f.project)).toEqual(before);
+    }
+    for (const data of [f.payload("created"), f.claude("receipt"), f.claude("failure"), f.claude("rejection")]) {
+      const result = f.invoke(data, { entry }); expect(result.status).toBe(0); expect(result.stderr).toContain("PostToolUse advisory"); codexReason(result.stderr);
+      expect(f.calls()).toEqual([]); expect(f.rows()).toEqual([]); expect(snapshot(f.project)).toEqual(before);
+    }
+  }
+  rmSync(join(f.tree, "hooks/aidlc-plan-approval-guard.ts")); const missing = snapshot(f.project);
+  const guard = f.invoke(f.payload("write")); expect(guard.status).toBe(2); expect(guard.stderr).toContain("aidlc-plan-approval-guard.ts"); expect(guard.stderr).not.toContain("Codex is not supported"); expect(snapshot(f.project)).toEqual(missing);
+  rmSync(f.binding); const unbound = snapshot(f.project);
+  const optOut = f.invoke(f.payload("write"), { entry: true, env: { AIDLC_PROJECT_DIR: undefined } });
+  expect(optOut.status).toBe(0); expect(optOut.stderr).toContain("not participating"); expect(snapshot(f.project)).toEqual(unbound);
+});
+
+test("every bridge tool rejects current or stored Codex before selection, binding, initialization or execution", () => {
+  const f = bridgeFixture(); const map = join(f.home, "session_map.json");
+  for (const state of ["missing", "fresh", "valid", "null-intent", "invalid-route"]) {
+    f.observe("kiro", "codex"); rmSync(f.binding, { force: true });
+    if (state === "missing" || state === "fresh") rmSync(dirname(f.engineBinding), { recursive: true });
+    if (state !== "missing") f.bind();
+    if (state === "valid") { seedStateFile(f.project, "state-mid-inception.md"); writeSessionBinding(f.project, session, "default", basename(seededRecordDir(f.project))); }
+    if (state === "invalid-route") { writeFileSync(f.binding, "{"); writeFileSync(map, JSON.stringify({ [key]: { provider: "codex", cwd: "relative" } })); }
+    const before = snapshot(f.project); for (const response of f.rpc()) refused(response);
+    expect(f.calls()).toEqual([]); expect(f.execs()).toEqual([]); expect(snapshot(f.project), state).toEqual(before);
+  }
+  for (const stored of ["codex", "blocked"]) for (const provider of ["acp", "claude_code", null]) {
+    f.observe(stored, provider, { backendConflict: true }); rmSync(f.binding, { force: true });
+    const before = snapshot(f.project); for (const response of f.rpc()) refused(response);
+    expect(f.calls()).toEqual([]); expect(f.execs()).toEqual([]); expect(snapshot(f.project)).toEqual(before); expect(existsSync(f.binding)).toBe(false);
+  }
+  for (const stored of [false, true]) {
+    const child = "subagent:blocked-child"; const childHash = createHash("sha256").update(child).digest("hex");
+    writeFileSync(map, JSON.stringify({ [key]: { provider: "acp", cwd: f.project }, [child]: { provider: stored ? "claude_code" : "codex", cwd: f.gateway } }));
+    writeFileSync(join(f.home, "config.json"), JSON.stringify({ agent: { subagent_cwd_allowed_roots: [f.project] } }));
+    if (stored) writeFileSync(join(dirname(f.engineBinding), `crew-${childHash}.binding.json`), JSON.stringify({ space: "default", intent: null, boundAt: new Date().toISOString(), backend: "blocked" }));
+    const before = snapshot(f.project);
+    refused(f.rpc([{ name: "aidlc_bind_session", arguments: { project_dir: f.project } }], { KIROCREW_SESSION_KEY: child })[0]);
+    expect(snapshot(f.project)).toEqual(before); expect(f.calls()).toEqual([]); expect(f.execs()).toEqual([]); expect(existsSync(join(dirname(f.binding), `${childHash}.json`))).toBe(false);
+  }
+});
+
+test("a warm admitted bridge rechecks a rekeyed Codex conversation without touching either session", async () => {
+  const f = bridgeFixture(); const second = "dashboard:blocked";
+  const mapping = join(f.home, `session_pid_${process.pid}.txt`); writeFileSync(mapping, key);
+  writeFileSync(join(f.home, "session_map.json"), JSON.stringify({ [key]: { provider: "acp", cwd: f.project }, [second]: { provider: "codex", cwd: f.project } }));
+  const client = f.client({ KIROCREW_SESSION_KEY: undefined, KIROCREW_HOST_PID: String(process.pid) });
+  const first = await client.request("tools/call", f.tools[1]); expect(first.result?.isError, JSON.stringify(first)).toBe(false);
+  expect(f.calls()).toEqual([{ args: ["engine", "status"], backend: "kiro", session, project: f.project }]);
+  expect(f.execs()).toEqual([{ command: process.execPath, args: [f.engine, "engine", "status"], backend: "kiro" }]);
+  writeFileSync(mapping, second); const before = snapshot(f.project);
+  for (const params of f.tools) { refused(await client.request("tools/call", params)); expect(snapshot(f.project)).toEqual(before); }
+  expect(f.calls()).toHaveLength(1);
+});
+
+test("bridge rechecks before execution and publication without erasing work already executed", () => {
+  for (const boundary of ["before-exec", "initialization", "after-exec", "stored-after-exec"]) {
+    const f = bridgeFixture(); f.bind(); const map = join(f.home, "session_map.json");
+    const changeProvider = `writeFileSync(${JSON.stringify(map)},${JSON.stringify(JSON.stringify({ [key]: { provider: "codex", cwd: f.project } }))});`;
+    const stored = JSON.stringify({ space: "default", intent: null, boundAt: new Date().toISOString(), backend: "blocked", backendConflict: true, retained: "engine output" });
+    let preload: string | undefined;
+    if (boundary === "before-exec") {
+      f.observe("unknown"); preload = join(f.project, "publication-change.ts");
+      writeFileSync(preload, `import {mock} from 'bun:test';import * as fs from 'node:fs';const rename=fs.renameSync;const writeFileSync=fs.writeFileSync;mock.module('node:fs',()=>({...fs,renameSync:(from,to)=>{const result=rename(from,to);if(to===${JSON.stringify(f.engineBinding)}){${changeProvider}}return result;}}));`);
+    } else {
+      if (boundary === "initialization") rmSync(f.engineBinding);
+      const initialize = `mkdirSync(${JSON.stringify(dirname(f.engineBinding))},{recursive:true});writeFileSync(${JSON.stringify(f.engineBinding)},${JSON.stringify(JSON.stringify({ space: "default", intent: null, boundAt: "initialized" }))});`;
+      writeFileSync(f.engine, `${f.engineBody}${boundary === "initialization" ? initialize : ""}${boundary === "stored-after-exec" ? `writeFileSync(${JSON.stringify(f.engineBinding)},${JSON.stringify(stored)});` : changeProvider}console.log('engine completed');`);
+    }
+    const bindingBefore = existsSync(f.engineBinding) ? { bytes: readFileSync(f.engineBinding), mtime: statSync(f.engineBinding).mtimeMs } : undefined;
+    const response = f.rpc([f.tools[1]], {}, preload)[0]; refused(response);
+    if (boundary === "before-exec") { expect(f.calls()).toEqual([]); expect(f.execs()).toEqual([]); expect(JSON.parse(readFileSync(f.engineBinding, "utf8"))).toMatchObject({ backend: "kiro" }); }
+    else {
+      expect(f.calls()).toEqual([{ args: boundary === "initialization" ? ["engine", "adapter", "kiro-crew", "AgentSpawn"] : ["engine", "status"], backend: boundary === "initialization" ? "unknown" : "kiro", session, project: f.project }]);
+      expect(f.execs()).toEqual([{ command: process.execPath, args: [f.engine, ...f.calls()[0].args], backend: boundary === "initialization" ? "unknown" : "kiro" }]);
+      if (boundary === "after-exec") {
+        expect(response.result!.content![0].text).toContain("backend publication after engine execution failed");
+        expect(readFileSync(f.engineBinding)).toEqual(bindingBefore!.bytes); expect(statSync(f.engineBinding).mtimeMs).toBe(bindingBefore!.mtime);
+      } else expect(readFileSync(f.engineBinding, "utf8")).toBe(boundary === "stored-after-exec" ? stored : JSON.stringify({ space: "default", intent: null, boundAt: "initialized" }));
+      expect(response.result!.content![0].text).not.toContain("engine completed");
+    }
+    const before = snapshot(f.project); for (const next of f.rpc()) refused(next); expect(snapshot(f.project)).toEqual(before);
+  }
 });

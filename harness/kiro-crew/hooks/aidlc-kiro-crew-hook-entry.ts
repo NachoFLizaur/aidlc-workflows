@@ -9,6 +9,8 @@
  * not authenticated grants. Shell-only unbound use has no hook protection.
  * Bun remains required with a native engine. Permission-path denial can block;
  * backend-start notifications are advisory and child delivery is not guaranteed.
+ * Current or stored Codex observations stay blocked despite disagreement or
+ * sticky conflict: guarded Pre refuses, Post remains advisory without a row.
  */
 import { createHash } from "node:crypto";
 import { accessSync, closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
@@ -78,7 +80,15 @@ const object = (value: unknown): value is JsonObject =>
 const text = (value: unknown): value is string => typeof value === "string" && value.trim().length > 0;
 const EVENTS = new Set(["AgentSpawn", "UserPromptSubmit", "PreToolUse", "PostToolUse", "Stop"]);
 
-export type CrewBackend = "kiro" | "claude" | "unknown";
+export type CrewBackend = "kiro" | "claude" | "unknown" | "blocked";
+export type CrewBackendObservation = { backend: Exclude<CrewBackend, "blocked">; reason?: never } | { backend: "blocked"; reason: "codex" };
+
+// The project adapter cannot import this App Kit module; keep the same refusal
+// text at both runtime boundaries. The bridge reuses this exported copy.
+export const CODEX_BLOCKED_REASON = "Codex is not supported as a Kiro Crew backend: Crew does not let AI-DLC intercept Codex tool permissions or identify the calling conversation. " +
+  "Choose Kiro CLI or Claude Code with its documented limits in Crew, then rerun setup and doctor. " +
+  "Version changes do not bypass this refusal. " +
+  "See docs/guide/harnesses/kiro-crew.md#codex-backend. The native Codex CLI harness is unaffected.";
 
 // Bounded no-follow snapshots supply observations, not process identity.
 function backendRecord(path: string): JsonObject | undefined {
@@ -98,25 +108,31 @@ function backendRecord(path: string): JsonObject | undefined {
 
 /** Read the own-key provider on every call before publication/import, never
  * config, tool titles or executable names. acp/kiro/kas share the Kiro grammar,
- * not a support guarantee. Missing, unreadable or other providers yield unknown;
+ * not a support guarantee. Codex yields blocked with reason codex; missing,
+ * unreadable or other providers yield unknown;
  * first-run child identity without a map entry is not backend evidence. No bypass. */
-export function crewBackendFromRecords(home: string, key: string): CrewBackend {
+export function crewBackendFromRecords(home: string, key: string): CrewBackendObservation {
   const map = backendRecord(join(home, "session_map.json"));
   const entry = map && Object.hasOwn(map, key) ? map[key] : undefined;
   const provider = object(entry) ? entry.provider : undefined;
-  return provider === "claude_code" ? "claude" : provider === "acp" || provider === "kiro" || provider === "kas" ? "kiro" : "unknown";
+  if (provider === "codex") return { backend: "blocked", reason: "codex" };
+  return { backend: provider === "claude_code" ? "claude" : provider === "acp" || provider === "kiro" || provider === "kas" ? "kiro" : "unknown" };
 }
 
 /** Read the exact parent-key binding and current provider before pins/import.
  * Missing, malformed or conflicting observations overwrite inherited pins with
  * unknown: guarded Pre refuses, Post emits no row. backendConflict stays sticky
  * until operator repair. Child hooks observe the parent, not the child's backend;
- * mixed configurations are not admitted by the conductor. No disabling flag. */
-export function boundCrewBackend(home: string, project: string, key: string): CrewBackend {
+ * mixed configurations are not admitted by the conductor. Current Codex or stored
+ * codex/blocked takes precedence over disagreement and sticky conflict, retaining
+ * reason codex. The bridge never publishes blocked; old/manual blocked state
+ * cannot authorize work. No disabling flag. */
+export function boundCrewBackend(home: string, project: string, key: string): CrewBackendObservation {
   const hash = createHash("sha256").update(key, "utf8").digest("hex");
   const binding = backendRecord(join(project, "aidlc/.aidlc-sessions", `crew-${hash}.binding.json`));
   const current = crewBackendFromRecords(home, key);
-  return binding?.backendConflict === undefined && binding?.backend === current ? current : "unknown";
+  if (current.backend === "blocked" || binding?.backend === "codex" || binding?.backend === "blocked") return { backend: "blocked", reason: "codex" };
+  return binding?.backendConflict === undefined && binding?.backend === current.backend ? current : { backend: "unknown" };
 }
 
 // Capture only named host variables, never the credential-bearing environment.
@@ -283,7 +299,7 @@ async function main(): Promise<number> {
     // One-shot pins precede import; never inherit a foreign native engine.
     process.env.AIDLC_PROJECT_DIR = projectDir;
     process.env.AIDLC_SESSION_OVERRIDE = `crew-${key}`;
-    process.env.AIDLC_CREW_BACKEND = boundCrewBackend(home, projectDir, payload.parent_session_key as string);
+    process.env.AIDLC_CREW_BACKEND = boundCrewBackend(home, projectDir, payload.parent_session_key as string).backend;
     process.env.AIDLC_HARNESS_DIR = ".kiro-crew";
     process.env.AIDLC_HARNESS_NAME = "kiro-crew";
     delete process.env.AIDLC_COMPILED_EXECUTABLE;

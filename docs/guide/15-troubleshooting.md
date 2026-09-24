@@ -108,6 +108,7 @@ a zero doctor exit with warnings is not startup clearance.
 | Project binding conflict | Use the exact Crew-recorded key for explicit rebinding; never guess keys or use gateway cwd as the project |
 | App payload mismatch | Follow [replacement](harnesses/kiro-crew.md#update-and-removal), preserve data, and re-grant trust after uninstall |
 | Uncertain child outcome or denied tool call | Stop and reconcile the named condition; do not retry through shell, another backend, or inline work |
+| Codex backend failure in setup/doctor, or refusal from MCP/hooks | Stop: [Codex is not supported through Crew](harnesses/kiro-crew.md#codex-backend). Choose Kiro CLI or the limited Claude backend yourself and rerun setup/doctor, or use the separate [native Codex CLI harness](harnesses/codex-cli.md). Never ask the conductor to switch backends or bypass the refusal. |
 
 For the [Claude backend](harnesses/kiro-crew.md#claude-code-backend):
 

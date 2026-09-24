@@ -33,6 +33,8 @@
  * Claude uses its own title grammar and correlated Bash ARTIFACT receipts below;
  * file-tool writes have no success Post. Native Task/Agent refusal cannot block
  * notification paths, and pre-approved reads bypass permission requests.
+ * Blocked Codex observations retain the same Pre refusal/Post advisory, with
+ * a named reason and no grammar, receipt ledger or write-audit row selected.
  */
 import { createHash, randomUUID } from "node:crypto";
 import { accessSync, appendFileSync, chmodSync, closeSync, constants, existsSync, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, realpathSync, statSync } from "node:fs";
@@ -62,10 +64,20 @@ const text = (value: unknown): value is string => typeof value === "string" && v
 const timestamp = (value: unknown): boolean => text(value) && Number.isFinite(Date.parse(value));
 const note = (message: string): void => { process.stderr.write(`AI-DLC Kiro Crew: ${message}\n`); };
 
-// Read per call; direct launches without a valid entry pin stay unknown.
-export function resolveBackend(): "kiro" | "claude" | "unknown" {
+// The project adapter cannot import the standalone App Kit entry; keep the same
+// refusal text in both runtime boundaries.
+const CODEX_BLOCKED_REASON = "Codex is not supported as a Kiro Crew backend: Crew does not let AI-DLC intercept Codex tool permissions or identify the calling conversation. " +
+  "Choose Kiro CLI or Claude Code with its documented limits in Crew, then rerun setup and doctor. " +
+  "Version changes do not bypass this refusal. " +
+  "See docs/guide/harnesses/kiro-crew.md#codex-backend. The native Codex CLI harness is unaffected.";
+
+/** Read the entry pin per call after participation and before grammar selection
+ * or core mutation. Missing/invalid pins stay unknown; blocked retains the Codex
+ * reason. Both refuse guarded Pre and drop Post rows. No disabling flag; absent
+ * binding nonparticipation and other event handling remain unchanged. */
+export function resolveBackend(): "kiro" | "claude" | "unknown" | "blocked" {
   const resolvedBackend = process.env.AIDLC_CREW_BACKEND;
-  return resolvedBackend === "kiro" || resolvedBackend === "claude" ? resolvedBackend : "unknown";
+  return resolvedBackend === "kiro" || resolvedBackend === "claude" || resolvedBackend === "blocked" ? resolvedBackend : "unknown";
 }
 
 export function crewSessionId(parentSessionKey: string): string {
@@ -622,7 +634,7 @@ export async function run(target: string, input: string, _extraArgs: string[] = 
       const prior = pins.map((key) => process.env[key]);
       try {
         for (const key of pins) { if (env[key] === undefined) delete process.env[key]; else process.env[key] = env[key]; }
-        if (resolvedBackend === "unknown") throw new Error("unknown or conflicting backend observation; no grammar selected");
+        if (resolvedBackend === "unknown" || resolvedBackend === "blocked") throw new Error(`unknown or conflicting backend observation; no grammar selected${resolvedBackend === "blocked" ? `; ${CODEX_BLOCKED_REASON}` : ""}`);
         const call = resolvedBackend === "claude" ? claudePostWrite(payload, project, session, arrivedAtMs) : postWrite(payload, project);
         if (!existsSync(auditFilePath(project))) note("PostToolUse advisory: audit shard missing; core will drop the write row");
         core("aidlc-write-audit-log.ts", { hook_event_name: event, tool_name: call.tool, tool_input: call.input });
@@ -655,7 +667,7 @@ export async function run(target: string, input: string, _extraArgs: string[] = 
       // Missing required guards deny before any fidelity-based exemption.
       for (const hook of hooks) accessSync(process.env.AIDLC_COMPILED_EXECUTABLE || join(HOOKS_DIR, hook), constants.R_OK);
       guarded = true;
-      if (resolvedBackend === "unknown") throw new Error(reviewer ? "reviewer-scope veto: unresolved backend cannot be inspected" : "unknown or conflicting backend observation; guarded tool refused");
+      if (resolvedBackend === "unknown" || resolvedBackend === "blocked") throw new Error(`${reviewer ? "reviewer-scope veto: unresolved backend cannot be inspected" : "unknown or conflicting backend observation; guarded tool refused"}${resolvedBackend === "blocked" ? `; ${CODEX_BLOCKED_REASON}` : ""}`);
       let classified: Classification;
       try { classified = resolvedBackend === "claude" ? classifyClaudeTool(payload, project) : classifyTool(payload, project); }
       catch (error) {

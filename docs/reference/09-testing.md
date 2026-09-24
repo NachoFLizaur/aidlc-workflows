@@ -780,6 +780,9 @@ the default is `kiro`, and other values fail before scratch allocation. Both use
 `kirocrew`, Bun, and the generated runtime; this registration-only check needs no Claude login.
 Actual Claude conversations also need the [Claude CLI, ACP adapter, and Node prerequisites](../guide/harnesses/kiro-crew.md#prerequisites).
 
+There is no supported Codex Crew live journey: `AIDLC_KIRO_CREW_BACKEND=codex`
+is rejected before scratch allocation. See [Codex backend limitations](../guide/harnesses/kiro-crew.md#codex-backend); native Codex CLI tests are unaffected.
+
 Without opt-in it skips before host lookup or scratch creation. `--no-llm`
 through the runner, or `AIDLC_NO_LLM=1`, also disables it. Once explicitly
 enabled, missing prerequisites fail rather than count as a successful skip.

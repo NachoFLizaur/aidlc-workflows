@@ -32,6 +32,10 @@ harness-neutral root `AGENTS.md` block; native setup lives at the paths above.
 Copilot keeps its full root onboarding exclusive, while Claude's full onboarding
 stays inside `.claude/`. Shared onboarding does not permit engine-directory collisions.
 
+The Codex CLI column describes the native harness, not a Crew backend.
+[Codex is not supported through Crew](../guide/harnesses/kiro-crew.md#codex-backend);
+native Codex CLI support is unaffected.
+
 The deterministic engine, state machine, audit log, stage graph, and swarm
 referee underneath are byte-identical across every harness — only the primitives
 that carry them differ. The rest of this chapter documents the **Claude Code**

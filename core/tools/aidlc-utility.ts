@@ -4125,14 +4125,15 @@ export async function collectDoctorReport(
       effective = { ...base, ...local };
     } catch (error) { configError = errorMessage(error); }
     /** Independent setup twin: read effective axes before reporting, never switch
-     * backends. Unknown selections fail; known limitations warn. Version commands
+     * backends. Unknown selections and global Codex fail; member-DM Codex warns,
+     * not a delegated-child selection. Claude/KAS retain their severity. Version commands
      * and no-follow metadata reads are informational, never admission. No shell,
      * adapter launch, install or bypass; session PATH may differ from the gateway. */
     const backendSupport = {
       "kiro-cli": "Kiro CLI backend",
       claude: "limited support: conductor and distinct-directory child sessions; file-tool write provenance, native delegation denial and running-child steering are not supported; see guide §Claude backend",
       kas: "not supported by this integration",
-      codex: "not supported by this integration",
+      codex: "Codex is not supported as a Kiro Crew backend: Crew does not let AI-DLC intercept Codex tool permissions or identify the calling conversation. Choose Kiro CLI or Claude Code with its documented limits in Crew, then rerun setup and doctor. Version changes do not bypass this refusal. The native Codex CLI harness is unaffected.",
     };
     const axis = (value: unknown, fallback: string) => {
       const selected = value === undefined ? fallback : value;
@@ -4190,16 +4191,21 @@ export async function collectDoctorReport(
         `Claude CLI: ${oneLine(version(cli))}${cli ? ` (${cli})` : " (not found on PATH)"}`,
         `Node: ${oneLine(version(node))}${node ? ` (${node})` : " (not found on PATH)"}; first node on PATH (shebang resolver); Crew's augmented PATH may differ`);
     }
-    row(configError || global.name === "unrecognized" || member.name === "unrecognized" ? "fail" : global.name === "kiro-cli" ? "ok" : "warn", "Backend",
-      `${configError ? `cannot read effective Crew config: ${configError}` : `agent.acp_backend=${global.detail}; agent.member_acp_backend=${member.detail} (member-DM only; not delegated-child selection)`}\n  Observations (informational): ${observations.join("\n    ")}`);
+    const axes = `agent.acp_backend=${global.detail}; agent.member_acp_backend=${member.detail} (member-DM only; not delegated-child selection)`;
+    const backendDetail = configError ? `cannot read effective Crew config: ${configError}`
+      : `${global.name === "codex" ? backendSupport.codex : axes}${global.name === "codex" || member.name === "codex" ? "\n  See docs/guide/harnesses/kiro-crew.md#codex-backend" : ""}`;
+    row(configError || global.name === "codex" || global.name === "unrecognized" || member.name === "unrecognized" ? "fail" : global.name === "kiro-cli" && member.name !== "codex" ? "ok" : "warn", "Backend",
+      `${backendDetail}\n  Observations (informational): ${observations.join("\n    ")}`);
     /** Collision twin: inspect before reporting, never mutate Claude files. Only
      * ENOENT is absent; unsafe/unreadable paths fail. availableModels-only seeds
      * warn without proving ownership. Global ~/.claude is lstat-only. Fail exits
      * 1; warnings exit 0 but hold conductor startup. Disabled only when neither
-     * axis is Claude; no bypass. This snapshot is not a direct MCP/live-hook lock. */
+     * axis is Claude or global Codex is blocked; no bypass. This snapshot is not
+     * a direct MCP/live-hook lock. */
     const collisionHelp = "Missing or invalid project stamps are checked by the bridge: Cannot bind Crew session: Invalid or mismatched stamp. Setup never modifies Claude files.";
     const collisionRemediation = "Remediation: move or remove these files (operator action; setup never modifies them), or use a clean project. Not a Kiro CLI concern.";
     if (configError) row("fail", "Claude project collision", "cannot read effective Crew config; collision check incomplete", collisionHelp);
+    else if (global.name === "codex") row("ok", "Claude project collision", "not evaluated (global codex blocked; see Backend row)");
     else if (global.name !== "claude" && member.name !== "claude") row("ok", "Claude project collision", global.name === "kiro-cli" ? "not applicable (backend kiro-cli)" : "not applicable");
     else {
       const classes: string[] = []; const reasons: string[] = []; const paths: string[] = []; const warnings: string[] = [];
@@ -4478,7 +4484,9 @@ export async function collectDoctorReport(
      * collapse without exposing keys; current identity is override/env only.
      * Mixed, missing-current or invalid observations warn, never establish child
      * inheritance or live-process identity. No writes or bypass; warnings hold
-     * conductor preflight even though their CLI exit is 0. */
+     * conductor preflight even though their CLI exit is 0. Codex selection or
+     * records take blocked precedence over mixed/consistent classification;
+     * Backend, not this warning row, owns global-selection failure. */
     const composition = () => {
       const selection = { global: configError ? "unrecognized" : global.name, member: configError ? "unrecognized" : member.name };
       const family = (name: string) => name === "kiro-cli" || name === "kas" ? "kiro-family" : name;
@@ -4506,6 +4514,7 @@ export async function collectDoctorReport(
       const recordNote = mapIssue || (entries ? `${entries} session records observed (labels only; not live process verification)` : "no session records observed; classification from config only");
       const currentNote = !current ? "current session not selected" : currentLabel ? `current session provider: ${currentLabel}` : "current session provider unverified (no matching map entry; no parent-backend inference)";
       const notes = `${observed}; ${recordNote}; ${currentNote}; unrecorded children are not verified`;
+      if (selection.global === "codex" || selection.member === "codex" || families.has("codex")) return { status: "warn" as const, detail: `blocked: codex selected or recorded; see the Backend row for compatibility; ${notes}` };
       const reasons: string[] = [];
       const known = selection.global !== "unrecognized" && selection.member !== "unrecognized";
       if (known && family(selection.global) !== family(selection.member)) reasons.push(`member-DM selection is a separate axis (member_acp_backend=${selection.member}, agent.acp_backend=${selection.global}); member-DM sessions can dispatch children on ${selection.global}`);

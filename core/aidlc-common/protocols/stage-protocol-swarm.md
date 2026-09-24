@@ -544,6 +544,8 @@ Restoration does not resume the old attempt or make its review current.
 
 ### Kiro Crew
 
+On Codex, stop: this Crew backend is blocked because Crew does not let AI-DLC intercept Codex tool permissions or identify the calling conversation. Do not dispatch, create artifacts or use another transport as a workaround. See docs/guide/harnesses/kiro-crew.md#codex-backend.
+
 Swarm fan-out is **unsupported** on Kiro Crew. **You — the live conductor — own dispatch; `aidlc-swarm.ts` remains the deterministic referee, not a dispatch loop.** On `invoke-swarm`, STOP before preparing worktrees, dispatch or artifact work. Do not call `spawn_run`/`spawn_continue`, substitute Kiro-native delegation, another harness binding or a shell-launched backend. Do not replace referee convergence evidence with host completion, claim Units, finalize, merge or report the batch completed/approved. Preserve existing worktrees and receipts for explicit recovery; never discard/re-prepare automatically.
 
 Offer the non-swarm ensemble path in the ensemble module's **Kiro Crew** subsection with `delegation.md` transport. Wait for the human's choice; never silently convert the directive or change its autonomy grant. Missing alternative binding/tools leaves the stop in place.

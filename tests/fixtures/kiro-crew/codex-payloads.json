@@ -1,0 +1,21 @@
+{
+  "observations": [
+    { "provider": "codex", "stored": "kiro" },
+    { "provider": "codex", "stored": "claude", "backendConflict": true },
+    { "provider": "codex", "stored": null },
+    { "provider": "acp", "stored": "codex" },
+    { "provider": "claude_code", "stored": "blocked", "backendConflict": true },
+    { "provider": null, "stored": "codex", "backendConflict": false },
+    { "provider": null, "stored": "blocked" }
+  ],
+  "pre": [
+    { "tool_name": "Read", "tool_input": { "file_path": "{{ARTIFACT}}" } },
+    { "tool_name": "Write", "tool_input": { "file_path": "{{ARTIFACT}}", "content": "replacement" } },
+    { "tool_name": "fs_read", "tool_input": { "path": "{{ARTIFACT}}" }, "agent_role": "aidlc-crew-product-lead-agent" },
+    { "tool_name": "@aidlc:engine/aidlc_status", "tool_input": {} },
+    { "tool_name": "mcp__aidlc_engine__aidlc_bind_session", "tool_input": {} },
+    { "tool_name": "Bash", "tool_input": { "command": "printf 'ARTIFACT %s' '{{ARTIFACT}}'" } },
+    { "tool_name": "Write", "tool_input": { "file_path": "../escape" } },
+    { "tool_name": "Creating note.md" }
+  ]
+}

@@ -28,6 +28,12 @@ containment. Display titles never become executable commands or write targets.
 Core policy switches still apply; there is no adapter-specific bypass.
 Child-hook delivery and arbitrary MCP write inspection are not guaranteed.
 
+Codex is [not supported as a Crew backend](../guide/harnesses/kiro-crew.md#codex-backend).
+Current Codex or a stored Codex/blocked binding refuses participating PreToolUse
+calls and drops PostToolUse audit rows with a diagnostic, before choosing a tool grammar.
+The bridge refuses before binding or engine execution; version checks cannot bypass this.
+The separate native Codex CLI harness and its hooks are unaffected.
+
 Kiro create/replace detection checks authorization freshness before emitting audit
 rows. Same-second ordering, duplicate rows, already-fresh files, and concurrent
 authorization replacement remain limitations. Detection is not prevention.

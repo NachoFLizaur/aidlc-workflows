@@ -15,6 +15,8 @@ native `aidlc` command.
 Kiro Crew has a separate host integration: its setup, MCP bridge, and script
 hooks require Bun even with native `aidlc`. Project config alone does not
 register or trust the App Kit. Follow [Crew install and verify](harnesses/kiro-crew.md#install-and-verify).
+Use Kiro CLI or the limited Claude backend; [Codex is not supported through Crew](harnesses/kiro-crew.md#codex-backend).
+This does not affect the separate [native Codex CLI harness](harnesses/codex-cli.md).
 
 ## Install
 

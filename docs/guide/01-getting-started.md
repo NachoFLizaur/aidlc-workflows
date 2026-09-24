@@ -112,6 +112,9 @@ still apply.
 | GitHub Copilot | Trust the project folder; use GitHub sign-in or BYOK | [GitHub Copilot](harnesses/copilot.md) |
 | Kiro Crew >= 0.6.0 | Bun, authenticated Kiro CLI or [Claude backend prerequisites](harnesses/kiro-crew.md#prerequisites), operator app trust, and registered hooks/MCP | [Kiro Crew](harnesses/kiro-crew.md) |
 
+Codex is [not supported as a Crew backend](harnesses/kiro-crew.md#codex-backend).
+The separate [native Codex CLI harness](harnesses/codex-cli.md) remains supported.
+
 ## AWS Bedrock Setup
 
 The Claude Code, Codex, and opencode distributions preserve the provider

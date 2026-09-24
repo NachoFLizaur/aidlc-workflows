@@ -474,6 +474,8 @@ If `directive.reviewer` is present, invoke the reviewer as a sub-agent (delegate
 
 ### Kiro Crew
 
+On Codex, stop: this Crew backend is blocked because Crew does not let AI-DLC intercept Codex tool permissions or identify the calling conversation. Do not dispatch, create artifacts or use another transport as a workaround. See docs/guide/harnesses/kiro-crew.md#codex-backend.
+
 Invoke `directive.reviewer` through `{{HARNESS_DIR}}/skills/aidlc/delegation.md` §§2–5. Resolve the registered role-map's `aidlc-crew-architecture-reviewer-agent` or `aidlc-crew-product-lead-agent`, never materialized filenames. Keep the engine identity in the brief, `**Reviewer:**` marker and receipts.
 
 **Task-carried bootstrap.** Each review uses `delegation.md` §2's ordered child brief: role, absolute parent-project persona-first read and engine path, reviewer/main/transport protocol reads, ordered active-rule pointers, task, Claude bind/argv and ACK. Keep §12a allowed context, `requestId`, `reviewFile`, iteration, stage/unit and `--single` in the task; never builder diary or reasoning. Explicit reads replace assumed resource loading. Claude binds its own identity to the parent's `project_dir` BEFORE engine argv operations. After terminal settlement apply §4 delivery verification BEFORE review acceptance or completion receipts: exact ACK on both backends, current-run persona Read on Claude. Missing evidence stops without silent retry. Bootstrap delivery is neither reviewer read-scope enforcement nor native Task/Agent denial.

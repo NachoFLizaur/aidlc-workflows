@@ -322,3 +322,32 @@ test("registration backend selection defaults to Kiro and refuses invalid select
     expect(result.status).not.toBe(0); expect(result.stderr).toContain("explicit live opt-in"); expect(existsSync(marker)).toBe(false);
   }
 });
+
+test("both channels expose the Codex stop through registered conductor, delegation and protocol resources", () => {
+  for (const channel of ["dist", "dist-release"]) {
+    const project = join(REPO_ROOT, channel, "kiro-crew"); const app = join(project, "kiro-crew-app");
+    const manifest = JSON.parse(readFileSync(join(app, "skills.manifest.json"), "utf8")) as CrewSkillsManifest;
+    const conductor = JSON.parse(readFileSync(join(app, "agents/aidlc.json"), "utf8")) as Agent;
+    const paths = [manifest.conductor, manifest.delegation].map((uri) => {
+      expect(conductor.resources).toContain(uri); return uri.replace(/^\w+:\/\//, "");
+    });
+    const actionablePaths = [...paths, ".kiro-crew/AGENTS.md"];
+    paths.push(".kiro-crew/AGENTS.md", ...["construction", "ensemble", "reviewer", "swarm"].map((name) => `.kiro-crew/aidlc-common/protocols/stage-protocol-${name}.md`));
+    for (const path of paths) {
+      const content = readFileSync(join(project, path), "utf8");
+      const stop = content.split("\n").find((line) => line.includes("Codex") && line.includes("#codex-backend"));
+      expect(stop, path).toBeDefined(); expect(stop).toMatch(/\bstop\b/i); expect(stop).toContain("intercept Codex tool permissions or identify the calling conversation");
+      expect(stop).toMatch(/(?:Do not dispatch, create artifacts|Stop without dispatch, artifact creation)/);
+      expect(stop).toContain("transport"); expect(stop).toContain("workaround");
+      if (actionablePaths.includes(path)) {
+        expect(stop).toContain("Codex is not supported as a Kiro Crew backend");
+        expect(stop).toContain("Choose Kiro CLI or Claude Code with its documented limits in Crew, then rerun setup and doctor.");
+        expect(stop).toContain("Version changes do not bypass this refusal.");
+        expect(stop).toContain("The native Codex CLI harness is unaffected.");
+      }
+    }
+    // Resolve real projected resources and validate the owning App Kit rather
+    // than pinning source prose or a digest of a historical protocol prefix.
+    expect(validateAppKit(files(app), project)).toEqual([]);
+  }
+});

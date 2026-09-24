@@ -1,7 +1,9 @@
 /** Stateless newline-delimited JSON-RPC bridge. Engine calls use this Bun and
  * the selected project's TypeScript entry, never shell/launcher/native fallback.
  * Stdout is protocol-only, diagnostics go to stderr, calls are serialized.
- * The engine owns durable workflow state. Bun is required with native installs. */
+ * The engine owns durable workflow state. Bun is required with native installs.
+ * Codex refusal precedes routing writes, initialization and every engine call,
+ * including existing bindings and resumed/rekeyed sessions; it publishes no state. */
 import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { closeSync, constants, fstatSync, lstatSync, mkdirSync, openSync, readFileSync, readSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
@@ -9,7 +11,7 @@ import { dirname, isAbsolute, join } from "node:path";
 import { createInterface } from "node:readline";
 import { fileURLToPath } from "node:url";
 import { classifyEngineBinding, crewHome, crewIdentityText, crewPidKey, crewSubagentProject, isRecordedKey, projectPath, sessionHash } from "../setup/aidlc-kiro-crew-setup.ts";
-import { boundCrewBackend, crewBackendFromRecords, validateCrewStamp, type CrewBackend } from "../hooks/aidlc-kiro-crew-hook-entry.ts";
+import { boundCrewBackend, CODEX_BLOCKED_REASON, crewBackendFromRecords, validateCrewStamp, type CrewBackend } from "../hooks/aidlc-kiro-crew-hook-entry.ts";
 
 // Also embedded in the generated conductor prompt; one transport contract.
 export const CREW_ENGINE_TRANSPORT = `**Engine transport on Crew.** After the first \`aidlc_status\`, EVERY AIDLC engine operation the conductor performs, including shared \`aidlc …\` notation, direct helper scripts (\`aidlc-*.ts\` under \`.kiro-crew/tools/\`, invoked with Bun), and commands returned inside directives, goes through \`@aidlc:engine/aidlc_engine\` with raw argv (\`{"args":[…]}\`), never through the shell tool. Translate by this canonical contract, not prefix stripping alone:
@@ -254,16 +256,34 @@ function writeBinding(selection: Selection, key: string) {
 
 /** Check stamp and TypeScript entry before every exec and first binding write.
  * Missing engine refuses even native-only projects; no launcher fallback or
- * bypass. Child-only pins clear inherited engine and identity-source overrides. */
+ * bypass. Child-only pins clear inherited engine and identity-source overrides.
+ * Check current/bound backend before exec and pin that same admitted snapshot,
+ * never a later unchecked read that could supply blocked. */
 function engineContext(context: Context, project: string, key: string) {
+  const backend = boundCrewBackend(context.home, project, key);
+  if (backend.backend === "blocked") throw new Error(CODEX_BLOCKED_REASON);
   stampedProject(project);
   const entry = join(project, ".kiro-crew/tools/aidlc.ts");
   try { if (!statSync(entry).isFile()) throw new Error("not a file"); }
   catch { throw new Error(`MCP bridge requires bun + project engine: missing ${entry}; native aidlc alone is not supported. Run project setup.`); }
-  const env: NodeJS.ProcessEnv = { ...process.env, AIDLC_PROJECT_DIR: project, AIDLC_SESSION_OVERRIDE: `crew-${sessionHash(key)}`, AIDLC_CREW_BACKEND: boundCrewBackend(context.home, project, key), AIDLC_HARNESS_DIR: ".kiro-crew", AIDLC_HARNESS_NAME: "kiro-crew", KIROCREW_HOME: context.home };
+  const env: NodeJS.ProcessEnv = { ...process.env, AIDLC_PROJECT_DIR: project, AIDLC_SESSION_OVERRIDE: `crew-${sessionHash(key)}`, AIDLC_CREW_BACKEND: backend.backend, AIDLC_HARNESS_DIR: ".kiro-crew", AIDLC_HARNESS_NAME: "kiro-crew", KIROCREW_HOME: context.home };
   delete env.AIDLC_SESSION_OVERRIDE_SOURCE;
   delete env.AIDLC_COMPILED_EXECUTABLE;
   return { entry, env };
+}
+
+/** Read the own-key provider plus the selected project's stored backend before
+ * selection, routing publication, each initialization/engine exec and backend
+ * publication. Either Codex observation refuses before that boundary; never write
+ * blocked/conflict state or select a fallback. Missing evidence stays unknown,
+ * not an inferred Codex observation. No disabling flag. These snapshots do not
+ * lock external writers: a later refusal cannot undo already-executed work. */
+function admittedBackend(context: Context, key: string, project?: string): Exclude<CrewBackend, "blocked"> {
+  const observed = crewBackendFromRecords(context.home, key);
+  if (observed.backend === "blocked" || (project !== undefined && boundCrewBackend(context.home, project, key).backend === "blocked")) {
+    throw new Error(CODEX_BLOCKED_REASON);
+  }
+  return observed.backend;
 }
 
 /** Re-read engine binding before routing writes/core work. Only absence starts
@@ -272,6 +292,7 @@ function engineContext(context: Context, project: string, key: string) {
  * Verify durable initialization after advisory spawn, never trust exit 0 alone.
  * Calls serialize locally; concurrent initializers remain possible. */
 async function bindAndInitialize(context: Context, key: string, projectDir?: string) {
+  admittedBackend(context, key);
   const selection = selectProject(context, key, projectDir);
   const project = selection.project;
   engineContext(context, project, key);
@@ -283,6 +304,7 @@ async function bindAndInitialize(context: Context, key: string, projectDir?: str
     return state.state === "valid";
   };
   const ready = initialized();
+  admittedBackend(context, key, project);
   const binding = writeBinding(selection, key);
   if (!ready) {
     const { entry, env } = engineContext(context, project, key);
@@ -308,15 +330,18 @@ async function bindAndInitialize(context: Context, key: string, projectDir?: str
  * extras. Missing records publish unknown; disagreeing known observations set
  * sticky backendConflict, retained across core rewrites within this call. Only
  * operator repair clears it. No config/title/process fallback or bypass. Corrupt
- * bindings refuse, never repair. Snapshot recheck before rename is not a lock. */
-function publishBackend(context: Context, project: string, key: string, prior?: { backend: CrewBackend; backendConflict?: true }): { backend: CrewBackend; backendConflict?: true } {
+ * bindings refuse, never repair. Snapshot recheck before rename is not a lock.
+ * Blocked observations refuse before publication without persisting backend or
+ * backendConflict; only admitted labels enter the publication payload. */
+function publishBackend(context: Context, project: string, key: string, prior?: { backend: Exclude<CrewBackend, "blocked">; backendConflict?: true }): { backend: Exclude<CrewBackend, "blocked">; backendConflict?: true } {
+  const observed = admittedBackend(context, key, project);
   const session = `crew-${sessionHash(key)}`;
   const path = join(project, "aidlc/.aidlc-sessions", `${session}.binding.json`);
   const before = routingText(path);
   const state = classifyEngineBinding(project, session);
   if (state.state !== "valid" || before === undefined) throw new Error(state.state === "corrupt" ? state.reason : `Missing engine session binding ${path}; no backend publication.`);
   const data = JSON.parse(before) as RecordValue;
-  const observed = crewBackendFromRecords(context.home, key);
+  if (data.backend === "codex" || data.backend === "blocked") throw new Error(CODEX_BLOCKED_REASON);
   const previous = Object.hasOwn(data, "backend") ? data.backend : prior?.backend;
   const conflict = data.backendConflict !== undefined || prior?.backendConflict === true ||
     (previous !== undefined && previous !== "unknown" && (previous !== "kiro" && previous !== "claude" || observed !== "unknown" && previous !== observed));

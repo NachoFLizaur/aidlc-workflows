@@ -857,6 +857,8 @@ how the question is shown, and never approves a later batch.
 
 ### Kiro Crew
 
+On Codex, stop: this Crew backend is blocked because Crew does not let AI-DLC intercept Codex tool permissions or identify the calling conversation. Do not dispatch, create artifacts or use another transport as a workaround. See docs/guide/harnesses/kiro-crew.md#codex-backend.
+
 - **`gate: "unresolved"`** — classify the walking-skeleton stance before running the body, using `## Walking Skeleton` in `aidlc/spaces/<space>/memory/org.md` → `team.md` → `project.md` (most-specific non-empty statement wins): "always"/"every greenfield feature" → `on`, "never" → `off`, scope-dependent/unspecified/empty → `scope-dependent`. Honour `PRACTICES_OVERRIDE`, then `report --skeleton-stance <on|off|scope-dependent>` and re-run `next`. Apply Construction metadata routing before body or gate work.
 
 **Plan Approval.** Follow the engine-owned single or Grouped Plan Approval question above. Show every target's summary and plan path, then END THE TURN. The real same-session human-turn hook reads the person's reply; run `next` afterwards. Never write approval questions, log answers, fingerprints or receipts yourself. Summary-confirmation settings do not waive Plan Approval; only the engine's current approval status authorizes generation.
