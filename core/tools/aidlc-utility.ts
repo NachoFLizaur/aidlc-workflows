@@ -4297,6 +4297,7 @@ export async function collectDoctorReport(
     const appEnv = `KIROCREW_HOME=${quote(crewHome)} KIRO_HOME=${quote(join(crewHome, "kiro"))}`;
     const replaceFix = `Stop Crew and other config writers. Run ${appEnv} kirocrew app uninstall aidlc (NEVER --purge-data; preserve data/bindings). Uninstall revokes trust: re-grant Settings → Security → Trusted Apps → aidlc. Obtain the current portable App Kit and rerun current-source setup: ${appCommand}; or use a clean dedicated home.`;
     let consistent = false;
+    let cacheDetail = "";
     let payloadError = "missing or invalid materialization receipt";
     try {
       if (!receipt) throw new Error(payloadError);
@@ -4314,16 +4315,7 @@ export async function collectDoctorReport(
       if (!self || [...materialized, "hooks.fragment.json", "hooks/aidlc-kiro-crew-hook-entry.ts", "mcp/aidlc-mcp-bridge.ts"].some((p) => !paths.has(p))) throw new Error("incomplete app inventory");
       const selfHash = self.sha256; self.sha256 = "";
       if (hash(`${JSON.stringify(inv, null, 2)}\n`) !== selfHash || selfHash !== receipt.portableInventorySelfHash) throw new Error("inventory self-hash or receipt provenance mismatch");
-      const visit = (dir: string, prefix = "") => {
-        for (const entry of readdirSync(dir, { withFileTypes: true })) {
-          if (!prefix && hostFiles.includes(entry.name)) continue;
-          const path = `${prefix}${entry.name}`;
-          if (entry.isSymbolicLink()) throw new Error(`symlink payload refused: ${path}`);
-          if (entry.isDirectory() && [...paths].some((p) => p.startsWith(`${path}/`))) visit(join(dir, entry.name), `${path}/`);
-          else if (!entry.isFile() || !paths.has(path)) throw new Error(`unexpected installed payload: ${path}`);
-        }
-      };
-      visit(app);
+      cacheDetail = verifyCrewInstalledEntries(app, inv.files);
       for (const f of inv.files) {
         if (f.path === "app-inventory.json") continue;
         const provenance = receipt.files[f.path];
@@ -4373,11 +4365,12 @@ export async function collectDoctorReport(
     }
     const boundary = "doctor verifies local consistency, not freshness against a newer source";
     if (appAbsent) row("fail", "App installed+enabled", `absent — installed.json missing; ${boundary}`, `Obtain the current portable App Kit and run ${appCommand}`);
-    else if (!consistent) row("fail", "App installed+enabled", `installed payload outdated or unverified: ${payloadError}; ${boundary}`, replaceFix);
+    else if (!consistent) row("fail", "App installed+enabled", `installed payload outdated or unverified: ${payloadError}; ${boundary}`,
+      payloadError.startsWith("Unverifiable Python cache:") ? "Stop Crew, delete __pycache__ and restart with PYTHONDONTWRITEBYTECODE=1, then recheck." : replaceFix);
     else if (!filePresent(conductor)) row("fail", "App installed+enabled", `expected conductor: ${conductor}; ${boundary}`, appFix);
     else row(installed.enabled ? "ok" : "warn", "App installed+enabled", installed.enabled
-      ? `enabled metadata, consistent payload and materialized conductor present; ${boundary}`
-      : `installed payload consistent but not enabled; ${boundary}`, appFix);
+      ? `enabled metadata, consistent payload and materialized conductor present; ${boundary}${cacheDetail}`
+      : `installed payload consistent but not enabled; ${boundary}${cacheDetail}`, appFix);
     // Snapshot only. Missing/unsafe command, interpreter, bridge or home fails;
     // no subprocess, effective gateway-HOME inference or bypass.
     let bridgePinned = false;
@@ -11114,6 +11107,157 @@ export async function main(argv: string[]): Promise<void> {
       );
   }
 }
+
+/** Installed payload and Python cache identity. Oracle: validated inventory +
+ * installed source bytes, read before setup mutation/doctor clearance. Callers
+ * still verify all inventoried hashes, including materialization. Caches require
+ * a hash-matching sibling source and exact compiled-payload hash. Never unmarshal
+ * or execute cache/source code. Require CPython 3.12 magic cb0d0d0a and flags
+ * 0/1/3; timestamp/hash header metadata is NOT identity.
+ * Source/cache reads are no-follow, nonblocking, regular, <=1 MiB. At most 16
+ * sources, three cache variants each; one isolated 5 s process per source emits
+ * all three expected hashes using the installed filename, never imports source.
+ * Release each code object before the next compile: retaining prior constants
+ * changes marshal reference encoding. Nonmatching encodings fail closed too.
+ * Resolver: absolute KIROCREW_PYTHON is authoritative (invalid means refusal);
+ * otherwise the resolved Crew launcher's python3.12 sibling, then the standard
+ * macOS bundle (at most 64 directory entries, sorted; kirocrew-backend-* only).
+ * Each candidate is verified as 3.12 with an isolated 5 s/4 KiB version check.
+ * No PATH Python lookup. Optional candidateRoots replaces launcher and bundle
+ * discovery on any platform; null disables that candidate, not verification.
+ * The interpreter is trusted operator/installation code, not authenticated here.
+ * All cache errors throw with a removal/bytecode-disabled remedy; no bypass.
+ * No caches means no interpreter lookup or source execution. This is a
+ * read snapshot, not a lock against concurrent ancestor replacement; stop
+ * Crew/writers for setup. Byte-identical twin in setup/aidlc-kiro-crew-setup.ts
+ * and aidlc-utility.ts: standalone App Kit cannot import core; core cannot
+ * import harness code.
+ */
+export function verifyCrewInstalledEntries(
+  root: string,
+  files: readonly { path: string; sha256: string }[],
+  candidateRoots?: { launcher: string | null; bundleRoot: string | null },
+): string {
+  const fs = require("node:fs") as typeof import("node:fs");
+  const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+  const paths = new Set(files.map((f) => f.path));
+  const sources = new Map(files.filter((f) => f.path.endsWith(".py")).map((f) => [f.path, f.sha256]));
+  const directories = new Set(files.flatMap((f) => f.path.split("/").slice(0, -1).map((_, i, parts) => parts.slice(0, i + 1).join("/"))));
+  let python: string | undefined;
+  let cacheSeen = false;
+  const refused = (reason: string): never => {
+    throw new Error(`Unverifiable Python cache: ${reason}; interpreter: ${python ?? "unresolved"}. Stop Crew, delete __pycache__ and restart with PYTHONDONTWRITEBYTECODE=1, then recheck.`);
+  };
+  const regularBytes = (path: string): Buffer => {
+    const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    try {
+      const stat = fs.fstatSync(fd); const limit = 1024 * 1024;
+      if (!stat.isFile() || stat.size > limit) refused("not a bounded regular file");
+      const buffer = Buffer.alloc(limit + 1); let size = 0;
+      while (size < buffer.length) {
+        const count = fs.readSync(fd, buffer, size, buffer.length - size, size);
+        if (!count) break;
+        size += count;
+      }
+      if (size > limit) refused("file exceeds 1 MiB");
+      return buffer.subarray(0, size);
+    } finally { fs.closeSync(fd); }
+  };
+  const entries = (path: string, limit: number): string[] => {
+    if (!fs.lstatSync(path).isDirectory()) throw new Error(`Symlink/non-directory payload refused: ${path}`);
+    const dir = fs.opendirSync(path); const names: string[] = [];
+    try {
+      for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
+        if (names.length >= limit) throw new Error(`Directory entry limit exceeded: ${path}`);
+        names.push(entry.name);
+      }
+    } finally { dir.closeSync(); }
+    return names.sort();
+  };
+  const executable = (path: string): string | undefined => {
+    try {
+      if (!isAbsolute(path) || !fs.statSync(path).isFile()) return undefined;
+      fs.accessSync(path, fs.constants.X_OK);
+      return path;
+    } catch { return undefined; }
+  };
+  const python312 = (path: string | null): string | undefined => {
+    const candidate = path === null ? undefined : executable(path);
+    if (!candidate) return undefined;
+    const result = spawnSync(candidate, ["-I", "-B", "-S", "-c", "import sys; print('.'.join(map(str,sys.version_info[:2])))"],
+      { timeout: 5_000, killSignal: "SIGKILL", maxBuffer: 4096, cwd: dirname(candidate) });
+    return !result.error && result.status === 0 && result.stdout.toString("utf8").trim() === "3.12" ? candidate : undefined;
+  };
+  const resolvePython = (): string | undefined => {
+    if (process.env.KIROCREW_PYTHON !== undefined) return python312(process.env.KIROCREW_PYTHON);
+    const launcher = candidateRoots ? candidateRoots.launcher : Bun.which("kirocrew");
+    if (launcher) try {
+      const sibling = python312(join(dirname(realpathSync(launcher)), "python3.12"));
+      if (sibling) return sibling;
+    } catch { /* Try the known bundle layout, never a generic PATH interpreter. */ }
+    // Product default for the standard macOS Crew installation's backend distribution.
+    const DEFAULT_CREW_MACOS_BACKEND_ROOT = "/Applications/KiroCrew.app/Contents/Resources/backend-dist";
+    const base = candidateRoots ? candidateRoots.bundleRoot : process.platform === "darwin" ? DEFAULT_CREW_MACOS_BACKEND_ROOT : null;
+    if (base) {
+      try {
+        for (const name of entries(base, 64)) if (/^kirocrew-backend-[^/]+$/.test(name)) {
+          const candidate = python312(join(base, name, "bin/python3.12"));
+          if (candidate) return candidate;
+        }
+      } catch { /* Missing/unreadable/unbounded bundle cannot establish identity. */ }
+    }
+    return undefined;
+  };
+  const expected = new Map<string, string[]>();
+  const cache = (dir: string, prefix: string) => {
+    cacheSeen = true;
+    try {
+      if (sources.size > 16) refused("more than 16 inventoried Python sources");
+      const siblings = [...sources.keys()].filter((path) => path.slice(0, path.lastIndexOf("/") + 1) === prefix);
+      if (!siblings.length) refused("__pycache__ is not beside an inventoried Python source");
+      python ??= resolvePython();
+      if (!python) refused("Python 3.12 interpreter not resolvable");
+      for (const name of entries(dir, siblings.length * 3)) {
+        const match = /^(.+)\.cpython-312(?:\.opt-([12]))?\.pyc$/.exec(name);
+        const source = `${prefix}${match?.[1]}.py`;
+        if (!match || !sources.has(source)) refused(`unrelated cache entry: ${name}`);
+        const path = join(dir, name);
+        if (!fs.lstatSync(path).isFile()) refused(`non-regular cache entry: ${name}`);
+        const bytes = regularBytes(path);
+        if (bytes.length <= 16 || bytes.subarray(0, 4).toString("hex") !== "cb0d0d0a" || ![0, 1, 3].includes(bytes.readUInt32LE(4))) refused(`invalid pyc header: ${name}`);
+        let hashes = expected.get(source);
+        if (!hashes) {
+          const sourcePath = join(root, source); const input = regularBytes(sourcePath);
+          if (hash(input) !== sources.get(source)) refused(`inventoried source hash mismatch: ${source}`);
+          const script = "import hashlib,importlib.util,marshal,sys; assert sys.version_info[:2]==(3,12) and importlib.util.MAGIC_NUMBER.hex()=='cb0d0d0a'; src=sys.stdin.buffer.read()\nfor n in range(3):\n code=compile(src,sys.argv[1],'exec',dont_inherit=True,optimize=n)\n print(hashlib.sha256(marshal.dumps(code)).hexdigest())\n del code";
+          const result = spawnSync(python!, ["-I", "-B", "-S", "-c", script, sourcePath], { input, timeout: 5_000, killSignal: "SIGKILL", maxBuffer: 4096, cwd: dirname(python!) });
+          if (result.error || result.status !== 0) refused(`Python 3.12 compilation failed: ${source}`);
+          hashes = result.stdout.toString("utf8").trim().split("\n");
+          if (hashes.length !== 3 || hashes.some((value) => !/^[a-f0-9]{64}$/.test(value))) refused("invalid compiler output");
+          expected.set(source, hashes);
+        }
+        if (hash(bytes.subarray(16)) !== hashes[Number(match![2] ?? 0)]) refused(`compiled payload mismatch: ${name}`);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Unverifiable Python cache:")) throw error;
+      refused(error instanceof Error ? error.message : "cache inspection failed");
+    }
+  };
+  const visit = (dir: string, prefix = "") => {
+    for (const name of entries(dir, paths.size + directories.size + 20)) {
+      if (!prefix && ["data", "installed.json", ".app_secret", ".aidlc-materialized.json"].includes(name)) continue;
+      const path = `${prefix}${name}`; const target = join(dir, name);
+      if (name === "__pycache__") { cache(target, prefix); continue; }
+      const entry = fs.lstatSync(target);
+      if (entry.isSymbolicLink()) throw new Error(`Symlink payload refused: ${path}`);
+      if (entry.isDirectory() && directories.has(path)) visit(target, `${path}/`);
+      else if (!entry.isFile() || !paths.has(path)) throw new Error(`Unexpected installed payload: ${path}`);
+    }
+  };
+  visit(root);
+  return cacheSeen ? `; verified Python cache (interpreter: ${python})` : "";
+}
+// End installed payload and Python cache identity twin.
 
 if (import.meta.main) {
   void main(process.argv.slice(2)).catch((error) => {

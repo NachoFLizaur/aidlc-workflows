@@ -339,6 +339,12 @@ describe("documentation parity derives current behavior from authored implementa
       expect(read("zensical.toml")).toContain(`"${path}"`);
     }
 
+    const crewGuide = read("docs", guidePaths["kiro-crew"]);
+    expect(crewGuide).toContain("\n## Progress page\n");
+    expect(crewGuide).toContain("../../reference/06-hooks-and-tools.md#kiro-crew-progress-routes");
+    expect(read("docs", "reference", "06-hooks-and-tools.md")).toContain("\n## Kiro Crew progress routes\n");
+    expect(read("docs", "guide", "15-troubleshooting.md")).toContain("harnesses/kiro-crew.md#progress-page");
+
     const glossaryDistribution = read("docs", "guide", "glossary.md")
       .split("\n")
       .find((line) => line.startsWith("| **Distribution** |"));

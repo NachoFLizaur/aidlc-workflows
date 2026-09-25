@@ -57,7 +57,7 @@ The engine and the host shell have different owners:
 
 | Location | Contents |
 | --- | --- |
-| `$KIROCREW_HOME/apps/aidlc/` | Registered App Kit: agents, resource manifests, setup, hook entry, launcher, and MCP bridge |
+| `$KIROCREW_HOME/apps/aidlc/` | Registered App Kit: agents, resources, setup, hooks, launcher, MCP bridge, progress page, and gateway routes |
 | `your-project/.kiro-crew/` | Engine, adapter, personas, protocols, skills, tools, and install metadata |
 | `your-project/.kiro-crew/AGENTS.md` | Internal onboarding, explicitly read by the conductor; not a root instruction file |
 | `your-project/aidlc/` | Shared spaces, intents, memory, and workflow records |
@@ -331,6 +331,60 @@ in Crew yourself, then rerun setup and doctor. Do not bypass a refusal through
 another tool or transport. The [native Codex CLI harness](codex-cli.md) remains
 supported and is unaffected; use its own setup to run Codex outside Crew.
 
+## Progress page
+
+Open **AI-DLC** in Crew's dashboard navigation (`/apps/aidlc`) after installing
+and enabling the trusted App Kit. Use the owner's dashboard session. The page
+reads projects already bound by conversations; if none appear, open an
+`aidlc-crew` chat on the project and let `aidlc_status` bind it first.
+
+The **Project** picker starts with the most recently bound valid project and
+keeps your explicit choice on refresh. Missing or invalid installation stamps
+leave projects listed but disabled. The **Intent** picker groups records by
+space: one eligible intent opens automatically; several require your choice.
+Archived, completed, orphan, registry-only, and unsupported-status records are
+listed but cannot be selected. Selection here does not change workflow bindings.
+
+**No eligible intents** means there is nothing to display, not zero completion.
+**Choose an intent** means selection is required. **Progress unavailable** or
+**Progress could not be refreshed** reports a read or access failure with its
+code; neither is a progress result. The footer says **Showing the last successful
+snapshot; it may be out of date.** only when progress is retained, otherwise
+**No progress is displayed.** Access and setup failures keep their diagnostic
+codes alongside **Access denied. Use an authenticated owner dashboard session and
+check that AI-DLC is enabled, then retry.** or **Project setup needs attention.
+Rerun project setup and doctor, then retry.** An empty project list says **No bound
+projects. Select your configured project in a new dashboard chat and message
+aidlc-crew; its first status call binds the project.** The live region announces
+**Progress refreshed.** or **Progress could not be refreshed.** on outcome changes,
+not each countdown tick.
+Stage labels reflect records: **Remaining** is pending, **in progress** is active
+work, **awaiting approval** needs a gate answer, and **revising** needs rework;
+**completed** and **skipped** are separate counts. Counts cover the effective
+stage plan, not individual Unit or Bolt trees. Gate age is shown only when known.
+
+Selected-intent blockers stay separate from project-level/unattributed work.
+Recorded backend and Crew provider labels are observations, not live identity
+or execution permission; a Codex label never admits the blocked backend.
+Refresh runs five seconds after success, pauses new requests while hidden, and
+resumes immediately when visible. Failures back off through 5, 10, 20, 40, then
+60 seconds. **Retry** requests a refresh; it is disabled during a live request.
+Switching project or intent clears old progress and ignores late responses.
+
+**Trust and privacy:** this is observe-only, with no workflow actions. It reads
+project registries, selected state/audit records, session bindings, and dispatch
+ledgers. The route runs unsandboxed inside Crew under local-app trust, not an OS
+sandbox; project paths and record details can reach the owner's dashboard.
+It never writes AI-DLC state, but Crew may write logs or Python bytecode caches.
+Setup/doctor require **CPython 3.12** to verify installed caches. Discovery uses
+absolute `KIROCREW_PYTHON` first (invalid means refusal), then `python3.12` beside
+the resolved Crew launcher, then the Kiro Crew app's bundled Python at its
+standard macOS location. Candidates must verify as 3.12; there is no runtime
+PATH Python lookup. Normal installs need no extra interpreter setup; otherwise
+set `KIROCREW_PYTHON` to a trusted absolute executable.
+No cache means no interpreter lookup.
+See the [route contract](../../reference/06-hooks-and-tools.md#kiro-crew-progress-routes) for bounds and errors.
+
 ## Update and removal
 
 Update between workflows with Crew and other writers stopped. Obtain the new
@@ -369,6 +423,7 @@ See [lifecycle ownership](../18-install-and-lifecycle.md#root-integrations-and-o
 | Missing Claude artifact audit row | Check the prior permission request, receipt grammar, freshness, and ledger limits; do not fabricate evidence |
 | Claude child MCP or delivery unavailable | Stop; check distinct authorized cwd, own-key parent-project bind, and fresh ACK/persona Read rather than using shell fallback |
 | Codex backend refused | Stop and follow [Codex backend alternatives](#codex-backend); setup never switches backends for you |
+| Progress/cache failure | See [progress remedies](../15-troubleshooting.md#kiro-crew-setup-and-startup); never edit stamps or records to bypass a read refusal |
 
 ## Other harnesses
 

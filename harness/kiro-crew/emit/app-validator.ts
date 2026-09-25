@@ -198,6 +198,24 @@ export function validateAppKit(
     if (typeof app[key] !== "string" || !app[key].trim()) errors.push(`app.json: missing ${key}`);
   }
   if (!strings(app.skills) || app.skills.length) errors.push("app.json: skills must remain project-side (empty skills array)");
+  // Client-side SDK prefix grant, not a server authorization boundary.
+  // Checked in the complete snapshot before emission writes; no bypass.
+  const ui = object(app.ui) ? app.ui : {};
+  if (typeof ui.entry !== "string" || !safePath(ui.entry) || !files.has(`ui/${ui.entry}`)) {
+    errors.push("app.json: ui.entry must resolve to an emitted file under ui/");
+  }
+  const page = Array.isArray(ui.pages) && ui.pages.length === 1 && object(ui.pages[0]) ? ui.pages[0] : {};
+  if (page.route !== "/apps/aidlc" || typeof page.label !== "string" || !page.label.trim() || typeof page.icon !== "string" || !page.icon.trim()) {
+    errors.push("app.json: expected one /apps/aidlc page with non-empty label and icon");
+  }
+  const backendHooks = object(app.backend) && object(app.backend.hooks) ? app.backend.hooks : {};
+  if (typeof backendHooks.routes !== "string" || !/^backend\.routes:register_routes$/.test(backendHooks.routes) || !files.has("backend/routes.py")) {
+    errors.push("app.json: backend.hooks.routes must name emitted backend.routes:register_routes");
+  }
+  if (!object(app.permissions) || Object.keys(app.permissions).join() !== "api" ||
+    !strings(app.permissions.api) || app.permissions.api.length !== 1 || app.permissions.api[0] !== "/api/apps/aidlc") {
+    errors.push("app.json: permissions must be exactly the own-namespace api grant");
+  }
   const mcp = object(app.mcpServers) ? app.mcpServers : {};
   const provisionedServers = new Set(["kirocrew-core", ...Object.keys(mcp).map((server) => `${app.name}:${server}`)]);
   const agentPaths = list(app.agents, "app.json agents");

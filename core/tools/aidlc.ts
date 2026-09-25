@@ -20,6 +20,7 @@ import {
   tipLabel,
 } from "./aidlc-color.ts";
 import { AIDLC_VERSION } from "./aidlc-version.ts";
+import { runProgressCli } from "./aidlc-progress.ts";
 import {
   aidlcInvocation,
   discoverProjectHarnesses,
@@ -56,7 +57,7 @@ type RouteOnly = "hook" | "statusline" | "adapter" | "tool-passthrough";
 type Visibility = "public" | "hidden" | "legacy";
 type RouteNamespace = RouteNamespaceName;
 type ProjectRequirement = "none" | "optional" | "required";
-type PinPolicy = "active" | "inspect" | "pinned";
+type PinPolicy = "active" | "inspect" | "pinned" | "read-only";
 type NetworkPolicy = "forbidden" | "explicit-only" | "interactive-bounded" | "required";
 type MutationScope =
   | "none"
@@ -212,6 +213,20 @@ export const SYSTEM_NAMESPACE_HELP: NamespaceHelpOptions = {
 
 // ROUTES_TABLE_START
 export const ROUTES: readonly Route[] = [
+  {
+    id: "top-progress",
+    group: "top",
+    kind: "top-passthrough",
+    classification: "passthrough",
+    verbs: ["progress"],
+    tool: "aidlc-progress.ts",
+    ...HIDDEN_ENGINE,
+    mutationScope: "none",
+    networkPolicy: "forbidden",
+    pinPolicy: "read-only",
+    outputModes: ["json"],
+    all: ["progress --json [--project-dir <abs>] [--space <name>] [--intent <id-or-slug>]"],
+  },
   {
     id: "crew-dispatch",
     group: "crew-dispatch",
@@ -2994,6 +3009,17 @@ export async function main(rawArgv: string[]): Promise<void> {
   const argv = canonicalizeLegacyCopilotHookArgv(rawArgv);
   process.exitCode = 0;
   bufferedStdin = null;
+  /**
+   * Oracle: exact registered progress route, before grammar/help, pin dispatch,
+   * reservation, recovery or delegate imports. Its closed reader runs here in
+   * the caller-selected project-local engine, never in a second executable.
+   * Failure is one JSON error, not a writer fallback. No env/flag disables this;
+   * every other route retains the original prelude and policy path below.
+   */
+  if (routePolicyFor(argv)?.id === "top-progress") {
+    process.exitCode = await runProgressCli(argv);
+    return;
+  }
   configureColor(argv);
   const projectDirOption = projectDirFlag(argv);
   if (projectDirOption.error) {

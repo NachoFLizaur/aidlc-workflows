@@ -351,3 +351,45 @@ test("both channels expose the Codex stop through registered conductor, delegati
     expect(validateAppKit(files(app), project)).toEqual([]);
   }
 });
+
+test("both channels register the progress page and routes with byte-derived inventory and a narrow API grant", () => {
+  for (const channel of ["dist", "dist-release"]) {
+    const project = join(REPO_ROOT, channel, "kiro-crew"); const app = join(project, "kiro-crew-app");
+    const manifest = JSON.parse(readFileSync(join(app, "app.json"), "utf8"));
+    expect(manifest.ui).toEqual({ entry: "index.mjs", pages: [{ route: "/apps/aidlc", label: "AI-DLC", icon: "Activity" }] });
+    expect(manifest.backend).toEqual({ hooks: { routes: "backend.routes:register_routes" } });
+    expect(manifest.permissions).toEqual({ api: ["/api/apps/aidlc"] }); expect(manifest.minKiroCrewVersion).toBe("0.6.0");
+    const inventory = JSON.parse(readFileSync(join(app, "app-inventory.json"), "utf8")) as AppInventory;
+    expect(inventory.files.filter(({ path }) => /^(ui|backend)\//.test(path)).map(({ path }) => path).sort()).toEqual(["backend/routes.py", "ui/index.mjs"]);
+    for (const path of ["ui/index.mjs", "backend/routes.py"]) {
+      const actual = readFileSync(join(app, path)); const source = readFileSync(join(REPO_ROOT, "harness/kiro-crew/app", path), "utf8").replace(/\r\n?/g, "\n").replace(/\n*$/, "\n");
+      expect(actual.toString()).toBe(source); expect(inventory.files.find((file) => file.path === path)?.sha256).toBe(sha(actual));
+    }
+    expect(validateAppKit(files(app), project)).toEqual([]);
+  }
+});
+
+test("page, route and SDK grant validation refuses absent, escaping and overbroad registrations", () => {
+  const source = files(join(runtime, "kiro-crew-app"));
+  for (const [patch, error] of [
+    [{ ui: {} }, /ui.entry/], [{ ui: { entry: "../app.json" } }, /ui.entry/], [{ ui: { entry: "absent.mjs" } }, /ui.entry/],
+    [{ ui: { entry: "index.mjs", pages: [] } }, /expected one/],
+    [{ ui: { entry: "index.mjs", pages: [{ route: "/apps/other", label: "Other", icon: "Activity" }] } }, /expected one/],
+    [{ backend: { hooks: { routes: "other:register_routes" } } }, /backend.hooks.routes/],
+    [{ permissions: { api: ["/api"] } }, /own-namespace/], [{ permissions: { api: ["/api/apps/aidlc", "/api/other"] } }, /own-namespace/],
+    [{ permissions: { api: ["/api/apps/aidlc"], extra: true } }, /own-namespace/],
+  ] as [Record<string, unknown>, RegExp][]) {
+    const changed = structuredClone(source); changeJson(changed, "app.json", (value) => Object.assign(value, patch));
+    expect(validateAppKit(changed, runtime).join("\n")).toMatch(error);
+  }
+  for (const path of ["ui/index.mjs", "backend/routes.py"]) expect(validateAppKit(source.filter((file) => file.path !== path), runtime).join("\n")).toMatch(/emitted/);
+});
+
+test("missing progress assets stop collection before replacing a previously emitted App Kit", () => {
+  for (const path of ["ui/index.mjs", "backend/routes.py"]) {
+    const ctx = fixture(); const app = join(ctx.distRoot, "kiro-crew-app"); const before = files(app);
+    rmSync(join(ctx.harnessRoot, "app", path));
+    expect(() => emit(ctx)).toThrow(); expect(files(app)).toEqual(before);
+    expect(readFileSync(join(ctx.distRoot, ".kiro-crew/tools/aidlc.ts"), "utf8")).toBe(readFileSync(join(runtime, ".kiro-crew/tools/aidlc.ts"), "utf8"));
+  }
+});

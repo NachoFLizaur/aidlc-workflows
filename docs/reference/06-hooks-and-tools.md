@@ -74,6 +74,39 @@ and the authorization-check-to-audit race remain limits: detection, not preventi
 
 ---
 
+## Kiro Crew progress routes
+
+The App Kit registers two GET routes beneath `/api/apps/aidlc`; the [progress page](../guide/harnesses/kiro-crew.md#progress-page) uses them through Crew's SDK.
+Every request checks the live app-enabled state, then `is_owner_dashboard_request`, before project reads or child execution. Missing imports or predicate failure refuses; there is no bypass.
+Responses carry `schemaVersion: 1`, `Cache-Control: no-store`, and this disclosure:
+
+> Observe-only is an application guarantee: this route runs unsandboxed inside the Crew gateway under the App Kit's local-app trust and never writes AIDLC state.
+
+| GET route | Request and result |
+| --- | --- |
+| `/projects` | No query parameters. Returns `projects` and counted `warnings` (`CORRUPT_BINDINGS` for ignored records). Canonical project paths are deduplicated and ordered by latest binding. Entries expose an opaque `id`, `displayName`, `boundAt`, `stampValid`, and `providerLabel`, not raw session keys. An empty list is valid. |
+| `/progress` | Required `project` is a returned 16-lowercase-hex id. Optional `space` (≤128 characters, `[A-Za-z0-9][A-Za-z0-9._-]*`) and `intent` (≤256, `[A-Za-z0-9][A-Za-z0-9_.:-]*`); intent requires space. Duplicate/extra parameters refuse. Rebuilds the project census and checks the stamp before spawning the selected project engine. |
+
+Progress returns `generatedAt`, `provider` (label/source/conflict), and the reader envelope. HTTP 200 states are `ok`, `empty`, or `selection-required`; only `ok` has `selected`. The census covers all spaces; explicit selection matches intent id before a unique slug. One eligible record auto-selects, none is empty, several require selection. Ineligible records stay visible.
+The reader also has `unavailable`/`error` states with `error.code/message`; CLI failures become minimal `error` envelopes. Never render them as zero progress. Selected data includes phases/stages, completed/total/skipped counts, gate ages when derivable, separate selected/unattributed blockers, recorded backend labels, and project-wide ledger counts. Provider/recorded labels never authorize execution.
+
+| HTTP | Refusal codes / meaning |
+| --- | --- |
+| 400 / 403 | `INVALID_QUERY` / `FORBIDDEN` (disabled app or non-owner) |
+| 404 / 409 | `UNKNOWN_PROJECT` / `INVALID_STAMP` (missing, malformed, mismatched, or unsafe project stamp) |
+| 503 | `GUARD_UNAVAILABLE`, `MATERIALIZATION_INVALID`, `LIMIT_EXCEEDED`, `UNSAFE_PATH`, `UNSAFE_FILE_KIND`, `SOURCE_CHANGED`, `SOURCE_UNREADABLE`, `SOURCE_MALFORMED`, `PROJECT_ID_COLLISION`, `READER_CANCELLED` |
+| 502 | `READER_START_FAILED`, `READER_OUTPUT_OVERFLOW`, `READER_MALFORMED`, or a valid reader failure envelope with its original code, such as `INVALID_SELECTION` or `MALFORMED_PLAN` |
+| 504 | `READER_TIMEOUT` |
+
+The shim accepts at most 1,000 binding-directory entries, 64 KiB per ordinary file, a 4 MiB/10,000-entry provider map, 16 MiB aggregate input, and 100,000 decoded JSON nodes at depth ≤64. It refuses symlinks/special files and changed snapshots rather than returning partial success; invalid individual bindings alone are counted and skipped.
+The reader separately caps files at 1 MiB, aggregate input at 16 MiB, directory entries at 2,000 each/10,000 overall, intents/scopes at 500 each, stages at 200 per graph/state/grid entry, bindings and ledger entries at 1,000 each, and audit blocks at 10,000. These limits cannot be disabled.
+The receipt's absolute Bun launches `<project>/.kiro-crew/tools/aidlc.ts engine progress --json --project-dir <project>` with optional `--space`/`--intent` pairs. No PATH fallback or shell is used. The project is cwd; the child gets a scrubbed environment, disposable HOME, and disabled Bun transpiler cache.
+Reader execution has a 10-second deadline, 1 MiB stdout and 64 KiB stderr caps; cleanup sends TERM, allows one second, then KILL, waits and closes pipes. Cancellation joins the worker before propagating; regular-file reads are off-loop, not covered by a remote-filesystem deadline.
+This hidden CLI route (`top-progress`, `pinPolicy: "read-only"`) bypasses startup/recovery and version redispatch. It requires `--json`, rejects duplicate/unknown flags, defaults project to cwd rather than host environment, and requires an absolute explicit project. A mismatched version pin warns on stderr only; stdout is one JSON document and exit is 0/1. Unlike the gateway, the standalone reader permits an absent stamp.
+Observation reads project records but performs no workflow mutations or repairs. Trust still covers the unsandboxed gateway and local executable; disposable HOME, host logs, and Python caches may be written. Setup/doctor cache verification discovers CPython 3.12 through absolute `KIROCREW_PYTHON` first (invalid means refusal), then the resolved Crew launcher's `python3.12` sibling, then the Kiro Crew app's bundled Python at its standard macOS location. There is no runtime PATH Python lookup. Normal installs need no extra interpreter setup; otherwise set `KIROCREW_PYTHON` as described in the guide. This does not select the route's Bun executable.
+
+---
+
 ## Hook System Architecture
 
 This implementation uses seventeen TypeScript hook sources in `.claude/hooks/`. A source-generated `dist/` projection invokes them through `bun`; native installs and versioned release runtimes route them through `aidlc engine hook`, `aidlc engine statusline`, or an `aidlc engine adapter` target. All seventeen are **project-wide** — registered in `settings.json` (the statusline via the top-level `statusLine` key, the other sixteen via the `hooks` block), they fire regardless of which skill is active when the host permits project hooks. Claude Code managed `allowManagedHooksOnly: true` overrides the project registration and blocks those hooks; `/aidlc --doctor` detects that policy. They were previously split (six declared in `aidlc/SKILL.md` frontmatter as skill-scoped, the rest project-wide); v0.6.0 moved the skill-scoped six into `settings.json` so every entry point — the orchestrator, each packaged scope/stage runner, and any hand-written customer runner — inherits the deterministic spine with no per-runner `hooks:` block.

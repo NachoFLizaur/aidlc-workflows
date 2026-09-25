@@ -1,0 +1,29 @@
+{
+  "stamp": { "schemaVersion": 1, "distribution": "kiro-crew", "harnessDir": ".kiro-crew", "frameworkVersion": "1.0.0" },
+  "disclosure": "Observe-only is an application guarantee: this route runs unsandboxed inside the Crew gateway under the App Kit's local-app trust and never writes AIDLC state.",
+  "projects": [
+    { "id": "0123456789abcdef", "displayName": "delivery", "boundAtHour": 8, "stampValid": true, "providerLabel": "codex" },
+    { "id": "fedcba9876543210", "displayName": "unstamped", "boundAtHour": 6, "stampValid": false, "providerLabel": "unknown" }
+  ],
+  "intents": [
+    { "space": "main", "id": "record-a", "displayName": "delivery", "eligible": true },
+    { "space": "design", "id": "record-b", "displayName": "delivery", "eligible": true },
+    { "space": "main", "id": "record-c", "displayName": "finished", "eligible": false, "reason": "completed" }
+  ],
+  "selected": {
+    "space": "main", "id": "record-a", "displayName": "delivery", "scope": "standard", "status": "in-progress",
+    "phases": [
+      { "name": "inception", "status": "completed", "stages": [{ "slug": "requirements", "state": "completed" }] },
+      { "name": "construction", "status": "active", "stages": [
+        { "slug": "execute", "state": "awaiting-approval", "gate": { "kind": "[?]", "ageMs": 60000 } },
+        { "slug": "validate", "state": "pending" }
+      ] }
+    ],
+    "totals": { "completed": 1, "total": 3, "skipped": 0 }, "activeStage": "execute",
+    "blockers": [{ "kind": "awaiting-approval", "ref": "execute" }],
+    "unattributedBlockers": [{ "kind": "dispatch-outstanding", "ref": "unbound work" }],
+    "backend": { "asRecorded": "kiro", "conflict": false, "source": "project-binding" },
+    "ledger": { "outstanding": 1, "settled": 0 }
+  },
+  "provider": { "label": "codex", "source": "crew-session-map", "conflict": false }
+}

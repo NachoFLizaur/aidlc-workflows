@@ -558,19 +558,156 @@ function payloadHash(root: string, path: string): string {
 function verifyPortable(root: string, inv: ReturnType<typeof inventory>) {
   for (const file of inv.value.files) if (file.path !== "app-inventory.json" && payloadHash(root, file.path) !== file.sha256) throw new Error(`Portable payload hash mismatch: ${file.path}`);
 }
-function verifyInstalledEntries(root: string, files: Inventory["files"]) {
+/** Installed payload and Python cache identity. Oracle: validated inventory +
+ * installed source bytes, read before setup mutation/doctor clearance. Callers
+ * still verify all inventoried hashes, including materialization. Caches require
+ * a hash-matching sibling source and exact compiled-payload hash. Never unmarshal
+ * or execute cache/source code. Require CPython 3.12 magic cb0d0d0a and flags
+ * 0/1/3; timestamp/hash header metadata is NOT identity.
+ * Source/cache reads are no-follow, nonblocking, regular, <=1 MiB. At most 16
+ * sources, three cache variants each; one isolated 5 s process per source emits
+ * all three expected hashes using the installed filename, never imports source.
+ * Release each code object before the next compile: retaining prior constants
+ * changes marshal reference encoding. Nonmatching encodings fail closed too.
+ * Resolver: absolute KIROCREW_PYTHON is authoritative (invalid means refusal);
+ * otherwise the resolved Crew launcher's python3.12 sibling, then the standard
+ * macOS bundle (at most 64 directory entries, sorted; kirocrew-backend-* only).
+ * Each candidate is verified as 3.12 with an isolated 5 s/4 KiB version check.
+ * No PATH Python lookup. Optional candidateRoots replaces launcher and bundle
+ * discovery on any platform; null disables that candidate, not verification.
+ * The interpreter is trusted operator/installation code, not authenticated here.
+ * All cache errors throw with a removal/bytecode-disabled remedy; no bypass.
+ * No caches means no interpreter lookup or source execution. This is a
+ * read snapshot, not a lock against concurrent ancestor replacement; stop
+ * Crew/writers for setup. Byte-identical twin in setup/aidlc-kiro-crew-setup.ts
+ * and aidlc-utility.ts: standalone App Kit cannot import core; core cannot
+ * import harness code.
+ */
+export function verifyCrewInstalledEntries(
+  root: string,
+  files: readonly { path: string; sha256: string }[],
+  candidateRoots?: { launcher: string | null; bundleRoot: string | null },
+): string {
+  const fs = require("node:fs") as typeof import("node:fs");
+  const hash = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
   const paths = new Set(files.map((f) => f.path));
+  const sources = new Map(files.filter((f) => f.path.endsWith(".py")).map((f) => [f.path, f.sha256]));
+  const directories = new Set(files.flatMap((f) => f.path.split("/").slice(0, -1).map((_, i, parts) => parts.slice(0, i + 1).join("/"))));
+  let python: string | undefined;
+  let cacheSeen = false;
+  const refused = (reason: string): never => {
+    throw new Error(`Unverifiable Python cache: ${reason}; interpreter: ${python ?? "unresolved"}. Stop Crew, delete __pycache__ and restart with PYTHONDONTWRITEBYTECODE=1, then recheck.`);
+  };
+  const regularBytes = (path: string): Buffer => {
+    const fd = fs.openSync(path, fs.constants.O_RDONLY | fs.constants.O_NOFOLLOW | fs.constants.O_NONBLOCK);
+    try {
+      const stat = fs.fstatSync(fd); const limit = 1024 * 1024;
+      if (!stat.isFile() || stat.size > limit) refused("not a bounded regular file");
+      const buffer = Buffer.alloc(limit + 1); let size = 0;
+      while (size < buffer.length) {
+        const count = fs.readSync(fd, buffer, size, buffer.length - size, size);
+        if (!count) break;
+        size += count;
+      }
+      if (size > limit) refused("file exceeds 1 MiB");
+      return buffer.subarray(0, size);
+    } finally { fs.closeSync(fd); }
+  };
+  const entries = (path: string, limit: number): string[] => {
+    if (!fs.lstatSync(path).isDirectory()) throw new Error(`Symlink/non-directory payload refused: ${path}`);
+    const dir = fs.opendirSync(path); const names: string[] = [];
+    try {
+      for (let entry = dir.readSync(); entry; entry = dir.readSync()) {
+        if (names.length >= limit) throw new Error(`Directory entry limit exceeded: ${path}`);
+        names.push(entry.name);
+      }
+    } finally { dir.closeSync(); }
+    return names.sort();
+  };
+  const executable = (path: string): string | undefined => {
+    try {
+      if (!isAbsolute(path) || !fs.statSync(path).isFile()) return undefined;
+      fs.accessSync(path, fs.constants.X_OK);
+      return path;
+    } catch { return undefined; }
+  };
+  const python312 = (path: string | null): string | undefined => {
+    const candidate = path === null ? undefined : executable(path);
+    if (!candidate) return undefined;
+    const result = spawnSync(candidate, ["-I", "-B", "-S", "-c", "import sys; print('.'.join(map(str,sys.version_info[:2])))"],
+      { timeout: 5_000, killSignal: "SIGKILL", maxBuffer: 4096, cwd: dirname(candidate) });
+    return !result.error && result.status === 0 && result.stdout.toString("utf8").trim() === "3.12" ? candidate : undefined;
+  };
+  const resolvePython = (): string | undefined => {
+    if (process.env.KIROCREW_PYTHON !== undefined) return python312(process.env.KIROCREW_PYTHON);
+    const launcher = candidateRoots ? candidateRoots.launcher : Bun.which("kirocrew");
+    if (launcher) try {
+      const sibling = python312(join(dirname(realpathSync(launcher)), "python3.12"));
+      if (sibling) return sibling;
+    } catch { /* Try the known bundle layout, never a generic PATH interpreter. */ }
+    // Product default for the standard macOS Crew installation's backend distribution.
+    const DEFAULT_CREW_MACOS_BACKEND_ROOT = "/Applications/KiroCrew.app/Contents/Resources/backend-dist";
+    const base = candidateRoots ? candidateRoots.bundleRoot : process.platform === "darwin" ? DEFAULT_CREW_MACOS_BACKEND_ROOT : null;
+    if (base) {
+      try {
+        for (const name of entries(base, 64)) if (/^kirocrew-backend-[^/]+$/.test(name)) {
+          const candidate = python312(join(base, name, "bin/python3.12"));
+          if (candidate) return candidate;
+        }
+      } catch { /* Missing/unreadable/unbounded bundle cannot establish identity. */ }
+    }
+    return undefined;
+  };
+  const expected = new Map<string, string[]>();
+  const cache = (dir: string, prefix: string) => {
+    cacheSeen = true;
+    try {
+      if (sources.size > 16) refused("more than 16 inventoried Python sources");
+      const siblings = [...sources.keys()].filter((path) => path.slice(0, path.lastIndexOf("/") + 1) === prefix);
+      if (!siblings.length) refused("__pycache__ is not beside an inventoried Python source");
+      python ??= resolvePython();
+      if (!python) refused("Python 3.12 interpreter not resolvable");
+      for (const name of entries(dir, siblings.length * 3)) {
+        const match = /^(.+)\.cpython-312(?:\.opt-([12]))?\.pyc$/.exec(name);
+        const source = `${prefix}${match?.[1]}.py`;
+        if (!match || !sources.has(source)) refused(`unrelated cache entry: ${name}`);
+        const path = join(dir, name);
+        if (!fs.lstatSync(path).isFile()) refused(`non-regular cache entry: ${name}`);
+        const bytes = regularBytes(path);
+        if (bytes.length <= 16 || bytes.subarray(0, 4).toString("hex") !== "cb0d0d0a" || ![0, 1, 3].includes(bytes.readUInt32LE(4))) refused(`invalid pyc header: ${name}`);
+        let hashes = expected.get(source);
+        if (!hashes) {
+          const sourcePath = join(root, source); const input = regularBytes(sourcePath);
+          if (hash(input) !== sources.get(source)) refused(`inventoried source hash mismatch: ${source}`);
+          const script = "import hashlib,importlib.util,marshal,sys; assert sys.version_info[:2]==(3,12) and importlib.util.MAGIC_NUMBER.hex()=='cb0d0d0a'; src=sys.stdin.buffer.read()\nfor n in range(3):\n code=compile(src,sys.argv[1],'exec',dont_inherit=True,optimize=n)\n print(hashlib.sha256(marshal.dumps(code)).hexdigest())\n del code";
+          const result = spawnSync(python!, ["-I", "-B", "-S", "-c", script, sourcePath], { input, timeout: 5_000, killSignal: "SIGKILL", maxBuffer: 4096, cwd: dirname(python!) });
+          if (result.error || result.status !== 0) refused(`Python 3.12 compilation failed: ${source}`);
+          hashes = result.stdout.toString("utf8").trim().split("\n");
+          if (hashes.length !== 3 || hashes.some((value) => !/^[a-f0-9]{64}$/.test(value))) refused("invalid compiler output");
+          expected.set(source, hashes);
+        }
+        if (hash(bytes.subarray(16)) !== hashes[Number(match![2] ?? 0)]) refused(`compiled payload mismatch: ${name}`);
+      }
+    } catch (error) {
+      if (error instanceof Error && error.message.startsWith("Unverifiable Python cache:")) throw error;
+      refused(error instanceof Error ? error.message : "cache inspection failed");
+    }
+  };
   const visit = (dir: string, prefix = "") => {
-    for (const entry of readdirSync(dir, { withFileTypes: true })) {
-      if (!prefix && ["data", ...HOST_FILES, RECEIPT].includes(entry.name)) continue;
-      const path = `${prefix}${entry.name}`;
+    for (const name of entries(dir, paths.size + directories.size + 20)) {
+      if (!prefix && ["data", "installed.json", ".app_secret", ".aidlc-materialized.json"].includes(name)) continue;
+      const path = `${prefix}${name}`; const target = join(dir, name);
+      if (name === "__pycache__") { cache(target, prefix); continue; }
+      const entry = fs.lstatSync(target);
       if (entry.isSymbolicLink()) throw new Error(`Symlink payload refused: ${path}`);
-      if (entry.isDirectory() && files.some((f) => f.path.startsWith(`${path}/`))) visit(join(dir, entry.name), `${path}/`);
+      if (entry.isDirectory() && directories.has(path)) visit(target, `${path}/`);
       else if (!entry.isFile() || !paths.has(path)) throw new Error(`Unexpected installed payload: ${path}`);
     }
   };
   visit(root);
+  return cacheSeen ? `; verified Python cache (interpreter: ${python})` : "";
 }
+// End installed payload and Python cache identity twin.
 export function readMaterializationReceipt(appRoot: string): MaterializationReceipt | undefined {
   try {
     const value: unknown = JSON.parse(readFileSync(join(appRoot, RECEIPT), "utf8"));
@@ -600,13 +737,13 @@ export function classifyApp(appRoot: string): AppClassification {
  * or enable. Missing/corrupt/drifted input stops, with no version shortcut or
  * bypass. Installed-source checks establish self-consistency only; apply refuses
  * that source for freshness decisions. */
-export function checkAppIdentity(sourceRoot: string, appRoot: string): { matches: boolean; reason: string } {
+export function checkAppIdentity(sourceRoot: string, appRoot: string): { matches: boolean; reason: string; cacheDetail?: string } {
   try {
     const inv = inventory(sourceRoot); const local = isInstalledInvocation(sourceRoot, appRoot);
     if (!local) verifyPortable(sourceRoot, inv);
     const receipt = readMaterializationReceipt(appRoot);
     if (!receipt || receipt.portableInventorySelfHash !== inv.selfHash) throw new Error("Missing/corrupt receipt or selected portable inventory differs");
-    verifyInstalledEntries(appRoot, inv.value.files);
+    const cacheDetail = verifyCrewInstalledEntries(appRoot, inv.value.files);
     if (resolve(receipt.appRoot) !== resolve(appRoot) || join(receipt.crewHome, "apps/aidlc") !== resolve(appRoot)) throw new Error("Receipt installation paths differ");
     if (readFileSync(join(appRoot, "app-inventory.json"), "utf8") !== inv.raw) throw new Error("Installed inventory differs");
     for (const file of inv.value.files) {
@@ -621,7 +758,7 @@ export function checkAppIdentity(sourceRoot: string, appRoot: string): { matches
         }
       } else if (payloadHash(appRoot, file.path) !== file.sha256) throw new Error(`Installed payload hash mismatch: ${file.path}`);
     }
-    return { matches: true, reason: local ? "Installed self-consistency verified; source freshness not established" : "Payload matches selected portable inventory and receipt" };
+    return { matches: true, reason: (local ? "Installed self-consistency verified; source freshness not established" : "Payload matches selected portable inventory and receipt") + cacheDetail, cacheDetail };
   } catch (error) { return { matches: false, reason: error instanceof Error ? error.message : String(error) }; }
 }
 /** Caller has admitted identity or just installed staging. Preserve bytes/time
@@ -961,7 +1098,13 @@ function status(o: Options, report: Report) {
   const identity = checkAppIdentity(APP, appRoot);
   let registered = false;
   try { verifyRegisteredSpecs(o.home); registered = appReady(o); } catch { /* Report, never repair. */ }
-  row(registered && identity.matches, "App installed+enabled", absentApp ? "Not installed; setup materializes before install/enable." : `Expected conductor: ${join(o.home, "kiro/agents/aidlc--aidlc-crew.json")}. ${identity.reason}`, appRemedyCommand(APP, o.home), absentApp);
+  const existingAppRow = report.rows.find((r) => r.what === "App installed+enabled");
+  if (identity.matches && identity.cacheDetail && existingAppRow?.status === "ok") existingAppRow.detail += identity.cacheDetail;
+  if (!identity.matches && identity.reason.startsWith("Unverifiable Python cache:")) {
+    const fix = "Stop Crew, delete __pycache__ and restart with PYTHONDONTWRITEBYTECODE=1, then recheck.";
+    if (existingAppRow) Object.assign(existingAppRow, { status: "fail", detail: identity.reason, fix });
+    else add(report, "fail", "App installed+enabled", identity.reason, fix);
+  } else row(registered && identity.matches, "App installed+enabled", absentApp ? "Not installed; setup materializes before install/enable." : `Expected conductor: ${join(o.home, "kiro/agents/aidlc--aidlc-crew.json")}. ${identity.reason}`, appRemedyCommand(APP, o.home), absentApp);
   const trusted = hasAppTrust(effective);
   const noTrust = [effective.apps_trusted, effective.apps_trusted_local].every((v) => v === undefined || (Array.isArray(v) && v.every((item) => typeof item === "string") && !v.includes("aidlc")));
   row(trusted, "Trust granted", "Local-app grant and local-consent marker (never blanket trust).", `Operator action: Settings → Security → Trusted Apps → aidlc (Crew home ${quote(o.home)}).`, noTrust);

@@ -692,6 +692,11 @@ describe("mechanismsOf is body-derived (milestone 3)", () => {
       "});",
     ].join("\n");
     expect(mechanismsOf("t99.none.test.ts", src)).toEqual(["cli"]);
+    const reader = "unit/t-aidlc-progress.test.ts";
+    expect(mechanismsOf(reader, readFileSync(join(TESTS_DIR, reader), "utf8"))).toEqual(["cli"]);
+    for (const file of ["t-kiro-crew-progress-page.test.ts", "t-kiro-crew-progress-shim.test.ts"]) {
+      expect(mechanismsOf(file, readFileSync(join(TESTS_DIR, "unit", file), "utf8"))).toEqual(["none"]);
+    }
   });
 
   test("runOrchestrateNext derives cli through the shared spawned-engine helper", () => {
@@ -808,6 +813,7 @@ describe("mechanismsOf is body-derived (milestone 3)", () => {
   // when their segment stopped saying cli. Same predicate, same honesty ratchet:
   // a new spawning test still cannot land without a human edit here.
   const EXPECTED_NONE_TO_CLI = [
+    "unit/t-aidlc-progress.test.ts",
     "unit/t-kiro-crew-packaging.test.ts",
     "unit/t-kiro-crew-adapter.test.ts",
     "unit/t-kiro-crew-setup.test.ts",

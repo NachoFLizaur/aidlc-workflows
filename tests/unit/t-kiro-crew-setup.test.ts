@@ -3,7 +3,7 @@ import { afterEach, expect, test, setDefaultTimeout } from "bun:test";
 import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { chmodSync, cpSync, existsSync, lstatSync, mkdirSync, readFileSync, readdirSync, readlinkSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
-import { delimiter, dirname, join } from "node:path";
+import { delimiter, dirname, isAbsolute, join } from "node:path";
 import { applyApp, bindCrewSession, checkAppIdentity, classifyApp, isInstalledInvocation, materializationPaths, materializeApp, materializeHooks, readMaterializationReceipt, verifyRegisteredSpecs, writeMaterializationReceipt } from "../../harness/kiro-crew/setup/aidlc-kiro-crew-setup.ts";
 import { cleanupTestProject, createTestProject, REPO_ROOT } from "../harness/fixtures.ts";
 import { NATIVE_FIXTURE_SETUP_TIMEOUT_MS, remainingOperationTimeoutMs } from "../harness/test-budget.ts";
@@ -21,7 +21,8 @@ function snapshot(root: string, prefix = ""): Record<string, string> {
     const path = prefix ? `${prefix}/${item.name}` : item.name; const full = join(root, path);
     if (item.isDirectory()) { result[`${path}/`] = "directory"; Object.assign(result, snapshot(root, path)); }
     else if (item.isSymbolicLink()) result[path] = `link:${readlinkSync(full)}`;
-    else result[path] = `${statSync(full).mode}:${statSync(full).mtimeMs}:${createHash("sha256").update(readFileSync(full)).digest("hex")}`;
+    else if (item.isFile()) result[path] = `${statSync(full).mode}:${statSync(full).mtimeMs}:${createHash("sha256").update(readFileSync(full)).digest("hex")}`;
+    else result[path] = `special:${lstatSync(full).mode}`;
   }
   return result;
 }
@@ -540,4 +541,212 @@ test("human doctor renders Codex failure and guide pointer without relaying diag
   expect(line).toContain("unaffected.?  See docs/guide/harnesses/kiro-crew.md#codex-backend?  Observations");
   expect(line).not.toContain("\r"); expect(line).not.toContain("\t"); expect(line).not.toContain("\u001b");
   expect(f.owned()).toEqual(before);
+});
+
+function cachePython() {
+  const override = process.env.AIDLC_TEST_PYTHON312;
+  const candidates = override === undefined ? [Bun.which("python3.12"), Bun.which("python3")] : [override];
+  for (const candidate of candidates) {
+    if (!candidate || !isAbsolute(candidate)) continue;
+    const result = spawnSync(candidate, ["-I", "-B", "-c", "import sys; print('.'.join(map(str,sys.version_info[:2])))"], { encoding: "utf8", timeout: 5000, maxBuffer: 4096 });
+    if (!result.error && result.status === 0 && result.stdout.trim() === "3.12") return candidate;
+  }
+  throw new Error("Cache tests require Python 3.12 on PATH or absolute AIDLC_TEST_PYTHON312; an invalid override cannot fall back");
+}
+function generateCache(python: string, source: string, optimize = 0, mode = "TIMESTAMP") {
+  const result = spawnSync(python, ["-I", "-B", "-S", "-c",
+    "import py_compile,sys; print(py_compile.compile(sys.argv[1],doraise=True,optimize=int(sys.argv[2]),invalidation_mode=getattr(py_compile.PycInvalidationMode,sys.argv[3])))", source, String(optimize), mode],
+  { encoding: "utf8", timeout: 5000, maxBuffer: 4096 });
+  expect(result.error).toBeUndefined(); expect(result.status, result.stderr).toBe(0); return result.stdout.trim();
+}
+type CacheFile = { path: string; sha256: string };
+type CacheCandidateRoots = { launcher: string | null; bundleRoot: string | null };
+type CacheObservation = { ok: boolean; detail: string; calls: { command: string; args: string[]; timeout: number; maxBuffer: number; killSignal: string; cwd: string; shell?: boolean }[]; which: string[]; versions: string[] };
+function cacheTwins(f: Fixture, app: string, files: CacheFile[], env: NodeJS.ProcessEnv, fault = "", candidateRoots: CacheCandidateRoots = { launcher: null, bundleRoot: null }) {
+  const script = join(f.root, "cache-verifiers.ts");
+  writeFileSync(script, `import {mock,spyOn} from 'bun:test';import * as cp from 'node:child_process';import * as fs from 'node:fs';const calls=[],which=[];const spawn=cp.spawnSync,lookup=Bun.which.bind(Bun);const roots=${JSON.stringify(candidateRoots)};const trace=process.env.FIXTURE_PYTHON_CALLS;
+mock.module('node:child_process',()=>({...cp,spawnSync:(command,args,options)=>{calls.push({command,args,timeout:options.timeout,maxBuffer:options.maxBuffer,killSignal:options.killSignal,cwd:options.cwd,shell:options.shell});
+if(${JSON.stringify(fault)}==='timeout')return {error:new Error('timed out'),status:null,stdout:Buffer.alloc(0)};
+if(${JSON.stringify(fault)}==='compiler'&&args.length>5)return {status:1,stdout:Buffer.alloc(0)};
+return spawn(command,args,options);}}));spyOn(Bun,'which').mockImplementation((name,...args)=>{which.push(name);return lookup(name,...args);});
+const results=[];for(const file of ${JSON.stringify([join(REPO_ROOT, "harness/kiro-crew/setup/aidlc-kiro-crew-setup.ts"), join(REPO_ROOT, "core/tools/aidlc-utility.ts")])}){
+const {verifyCrewInstalledEntries}=await import(file);calls.length=0;which.length=0;if(trace)fs.writeFileSync(trace,'');let ok=true,detail='';try{detail=verifyCrewInstalledEntries(${JSON.stringify(app)},${JSON.stringify(files)},roots);}catch(error){ok=false;detail=error.message;}const versions=trace?fs.readFileSync(trace,'utf8').trim().split('\\n').filter(Boolean).map(line=>JSON.parse(line)):[];results.push({ok,detail,calls:[...calls],which:[...which],versions});}console.log(JSON.stringify(results));`);
+  const before = snapshot(app);
+  const result = spawnSync(process.execPath, [script], { cwd: f.root, env: { ...f.env, ...env }, encoding: "utf8", timeout: NATIVE_FIXTURE_SETUP_TIMEOUT_MS, maxBuffer: 4 * 1024 * 1024 });
+  expect(result.error).toBeUndefined(); expect(result.status, result.stderr).toBe(0); expect(snapshot(app)).toEqual(before);
+  const observations = JSON.parse(result.stdout) as CacheObservation[]; expect(observations).toHaveLength(2);
+  for (const observation of observations) for (const call of observation.calls) {
+    expect(call.args.slice(0, 4)).toEqual(["-I", "-B", "-S", "-c"]); expect(call.timeout).toBe(5000); expect(call.maxBuffer).toBe(4096); expect(call.killSignal).toBe("SIGKILL");
+    expect(call.cwd).toBe(dirname(call.command)); expect(call.shell).toBeUndefined();
+  }
+  return observations;
+}
+function cacheFixture(count = 1) {
+  const f = fixture(); const app = join(f.root, "cache-app"); const marker = join(f.root, "source-executed"); const files: CacheFile[] = [];
+  for (let i = 0; i < count; i++) {
+    const path = `backend/source-${i}.py`; const source = `from pathlib import Path\nPath(${JSON.stringify(marker)}).write_text('not allowed')\nassert False, 'source must not execute'\n`;
+    const full = join(app, path); mkdirSync(dirname(full), { recursive: true }); writeFileSync(full, source);
+    files.push({ path, sha256: createHash("sha256").update(source).digest("hex") });
+  }
+  return { ...f, app, marker, files };
+}
+
+function cacheDiscoveryFixture() {
+  const python = cachePython(); const f = cacheFixture(); const cache = generateCache(python, join(f.app, f.files[0].path));
+  // Simulate version reports only; cache compilation still uses real CPython.
+  const interpreter = (path: string, version = "3.12") => {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(path, `#!${python}
+import json,os,sys
+if len(sys.argv)==6:
+ with open(os.environ['FIXTURE_PYTHON_CALLS'],'a') as trace:
+  trace.write(json.dumps(os.path.abspath(sys.argv[0]))+'\\n')
+ print(${JSON.stringify(version)})
+else:
+ os.execv(${JSON.stringify(python)},[${JSON.stringify(python)},*sys.argv[1:]])
+`, { mode: 0o755 });
+    return path;
+  };
+  const sibling = interpreter(join(f.root, "crew-runtime/bin/python3.12")); const realLauncher = join(dirname(sibling), "kirocrew"); writeFileSync(realLauncher, "launcher location\n");
+  const launcher = join(f.root, "launchers/kirocrew"); mkdirSync(dirname(launcher)); symlinkSync(realLauncher, launcher);
+  const bundleRoot = join(f.root, "bundle"); const bundled = interpreter(join(bundleRoot, "kirocrew-backend-b/bin/python3.12"));
+  const pathPython = interpreter(join(f.root, "path-bin/python3.12")); symlinkSync(pathPython, join(dirname(pathPython), "python3"));
+  const env = { KIROCREW_PYTHON: undefined, PATH: dirname(pathPython), FIXTURE_PYTHON_CALLS: join(f.root, "python-versions.jsonl") }; const candidates = { launcher, bundleRoot };
+  const run = (override?: string, fault = "", roots: CacheCandidateRoots = candidates) => cacheTwins(f, f.app, f.files, { ...env, KIROCREW_PYTHON: override }, fault, roots);
+  return { ...f, cache, interpreter, sibling, bundled, bundleRoot, candidates, run };
+}
+function expectCacheResolution(results: CacheObservation[], interpreter: string | null, commands: string[]) {
+  for (const result of results) {
+    expect(result.ok, result.detail).toBe(interpreter !== null);
+    expect(result.detail).toBe(interpreter === null
+      ? "Unverifiable Python cache: Python 3.12 interpreter not resolvable; interpreter: unresolved. Stop Crew, delete __pycache__ and restart with PYTHONDONTWRITEBYTECODE=1, then recheck."
+      : `; verified Python cache (interpreter: ${interpreter})`);
+    expect(result.calls.map((call) => call.command)).toEqual(commands); expect(result.which).toEqual([]);
+    expect(result.versions).toEqual(interpreter === null ? commands : commands.slice(0, -1));
+  }
+}
+
+test("both cache verifiers use authoritative overrides without consulting usable injected fallbacks", () => {
+  const f = cacheDiscoveryFixture(); const override = f.interpreter(join(f.root, "override/python3.12"));
+  expectCacheResolution(f.run(override), override, [override, override]);
+  const wrong = f.interpreter(join(f.root, "wrong/python3.12"), "3.11");
+  const notExecutable = f.interpreter(join(f.root, "nonexecutable/python3.12")); chmodSync(notExecutable, 0o600);
+  for (const invalid of ["relative", "", join(f.root, "absent/python3.12"), notExecutable, wrong]) {
+    expectCacheResolution(f.run(invalid), null, invalid === wrong ? [wrong] : []);
+  }
+  rmSync(dirname(f.cache), { recursive: true });
+  for (const result of f.run()) expect(result).toEqual({ ok: true, detail: "", calls: [], which: [], versions: [] });
+  expect(existsSync(f.marker)).toBe(false);
+});
+
+test("both cache verifiers resolve launcher symlinks before bundles and ignore PATH interpreters", () => {
+  const f = cacheDiscoveryFixture();
+  // A decoy beside the symlink must not outrank the resolved launcher's sibling.
+  f.interpreter(join(dirname(f.candidates.launcher), "python3.12"));
+  expectCacheResolution(f.run(), f.sibling, [f.sibling, f.sibling]);
+  for (const fault of ["missing", "nonexecutable", "wrong-version"]) {
+    rmSync(f.sibling, { force: true });
+    if (fault !== "missing") f.interpreter(f.sibling, fault === "wrong-version" ? "3.11" : "3.12");
+    if (fault === "nonexecutable") chmodSync(f.sibling, 0o600);
+    expectCacheResolution(f.run(), f.bundled, [...(fault === "wrong-version" ? [f.sibling] : []), f.bundled, f.bundled]);
+  }
+  expectCacheResolution(f.run(undefined, "", { launcher: null, bundleRoot: null }), null, []);
+  expect(existsSync(f.marker)).toBe(false);
+});
+
+test("both cache verifiers bound bundle discovery before selecting sorted fixed-layout candidates", () => {
+  const f = cacheDiscoveryFixture(); const roots: CacheCandidateRoots = { launcher: null, bundleRoot: f.bundleRoot };
+  const later = f.interpreter(join(f.bundleRoot, "kirocrew-backend-c/bin/python3.12"));
+  const earlier = f.interpreter(join(f.bundleRoot, "kirocrew-backend-a/bin/python3.12"), "3.11");
+  for (const path of ["other-backend/bin/python3.12", "kirocrew-backend-/bin/python3.12", "nested/kirocrew-backend-first/bin/python3.12", "kirocrew-backend-flat/python3.12", "kirocrew-backend-generic/bin/python3"]) f.interpreter(join(f.bundleRoot, path));
+  writeFileSync(join(f.bundleRoot, "kirocrew-backend-file"), "not a directory");
+  const run = (bundleRoot: string | null = f.bundleRoot) => f.run(undefined, "", { ...roots, bundleRoot });
+  expectCacheResolution(run(), f.bundled, [earlier, f.bundled, f.bundled]);
+  rmSync(f.bundled); rmSync(later);
+  expectCacheResolution(run(), null, [earlier]);
+  f.interpreter(f.bundled);
+  for (let count = readdirSync(f.bundleRoot).length; count < 64; count++) mkdirSync(join(f.bundleRoot, `unused-${count}`));
+  expectCacheResolution(run(), f.bundled, [earlier, f.bundled, f.bundled]);
+  const overflow = join(f.bundleRoot, "one-too-many"); mkdirSync(overflow);
+  expectCacheResolution(run(), null, []); rmSync(overflow, { recursive: true });
+  chmodSync(f.bundleRoot, 0);
+  try { expectCacheResolution(run(), null, []); } finally { chmodSync(f.bundleRoot, 0o755); }
+  const notDirectory = join(f.root, "bundle-file"); writeFileSync(notDirectory, "not a directory");
+  const linked = join(f.root, "bundle-link"); symlinkSync(f.bundleRoot, linked);
+  for (const absent of [null, join(f.root, "missing-bundle"), notDirectory, linked]) expectCacheResolution(run(absent), null, []);
+  expect(existsSync(f.marker)).toBe(false);
+});
+
+test("both cache verifiers accept real compiled variants within budgets without executing source or trusting header metadata", () => {
+  const python = cachePython(); const f = cacheFixture(16);
+  const source = join(f.app, f.files[0].path); const bounded = `${read(source)}#`.padEnd(1024 * 1024, " ");
+  writeFileSync(source, bounded); f.files[0].sha256 = createHash("sha256").update(bounded).digest("hex");
+  const before = cacheTwins(f, f.app, f.files, { KIROCREW_PYTHON: "relative-invalid", PATH: "" });
+  for (const result of before) { expect(result).toMatchObject({ ok: true, detail: "", calls: [], which: [] }); }
+  for (const file of f.files) for (const [optimize, mode] of [[0, "TIMESTAMP"], [1, "UNCHECKED_HASH"], [2, "CHECKED_HASH"]] as const) generateCache(python, join(f.app, file.path), optimize, mode);
+  for (const result of cacheTwins(f, f.app, f.files, { KIROCREW_PYTHON: python, PATH: "" })) {
+    expect(result.ok, result.detail).toBe(true); expect(result.detail).toContain(`verified Python cache (interpreter: ${python})`);
+    expect(result.which).toEqual([]); expect(result.calls).toHaveLength(17);
+  }
+  const cache = join(f.app, "backend/__pycache__/source-0.cpython-312.pyc"); const bytes = readFileSync(cache); bytes.fill(255, 8, 16); writeFileSync(cache, bytes);
+  for (const result of cacheTwins(f, f.app, f.files, { KIROCREW_PYTHON: python })) expect(result.ok, result.detail).toBe(true);
+  expect(existsSync(f.marker)).toBe(false);
+});
+
+test("both cache verifiers refuse unsafe entries and failed bounded interpreter checks", () => {
+  const python = cachePython(); const f = cacheFixture(); const source = join(f.app, f.files[0].path);
+  const cache = generateCache(python, source); const bytes = readFileSync(cache); const original = read(source);
+  const refuse = (env: NodeJS.ProcessEnv, files = f.files, fault = "") => {
+    for (const result of cacheTwins(f, f.app, files, env, fault)) { expect(result.ok, result.detail).toBe(false); expect(result.detail).toContain("Unverifiable Python cache:"); expect(result.detail).toContain("delete __pycache__"); expect(result.detail).toContain("PYTHONDONTWRITEBYTECODE=1"); }
+  };
+  const env = { KIROCREW_PYTHON: python }; refuse(env, f.files, "timeout"); refuse(env, f.files, "compiler");
+  for (const kind of ["magic", "flags", "short", "payload", "oversize", "cache-link", "source-link", "source-drift", "source-oversize", "unknown", "fourth-variant", "no-sibling", "source-budget", ...(process.platform === "win32" ? [] : ["fifo"])]) {
+    const extra = join(dirname(cache), "unrelated.cpython-312.pyc"); const foreign = join(f.app, "__pycache__"); const saved = join(f.root, "source-copy.py"); writeFileSync(saved, original);
+    let files = f.files;
+    if (kind === "magic") { const changed = Buffer.from(bytes); changed[0] ^= 1; writeFileSync(cache, changed); }
+    if (kind === "flags") { const changed = Buffer.from(bytes); changed.writeUInt32LE(4, 4); writeFileSync(cache, changed); }
+    if (kind === "short") writeFileSync(cache, bytes.subarray(0, 16));
+    if (kind === "payload") { const changed = Buffer.from(bytes); changed[changed.length - 1] ^= 1; writeFileSync(cache, changed); }
+    if (kind === "oversize") writeFileSync(cache, Buffer.alloc(1024 * 1024 + 1));
+    if (kind === "cache-link") { rmSync(cache); symlinkSync(saved, cache); }
+    if (kind === "source-link") { rmSync(source); symlinkSync(saved, source); }
+    if (kind === "source-drift") writeFileSync(source, "changed = True\n");
+    if (kind === "source-oversize") writeFileSync(source, `#${" ".repeat(1024 * 1024)}`);
+    if (kind === "unknown") writeFileSync(extra, bytes);
+    if (kind === "fourth-variant") for (const name of ["source-0.cpython-312.opt-1.pyc", "source-0.cpython-312.opt-2.pyc", "source-0.cpython-312.opt-3.pyc"]) writeFileSync(join(dirname(cache), name), bytes);
+    if (kind === "no-sibling") mkdirSync(foreign, { recursive: true });
+    if (kind === "source-budget") files = [...f.files, ...Array.from({ length: 16 }, (_, i) => ({ path: `backend/extra-${i}.py`, sha256: f.files[0].sha256 }))];
+    if (kind === "fifo") { rmSync(cache); expect(spawnSync("mkfifo", [cache], { timeout: 2000 }).status).toBe(0); }
+    refuse(env, files);
+    rmSync(dirname(cache), { recursive: true }); mkdirSync(dirname(cache)); writeFileSync(cache, bytes);
+    rmSync(source); writeFileSync(source, original); rmSync(foreign, { recursive: true, force: true });
+  }
+  expect(existsSync(f.marker)).toBe(false);
+}, NATIVE_FIXTURE_SETUP_TIMEOUT_MS * 2);
+
+test("cache identity controls setup admission and doctor clearance without weakening source freshness or repairing files", () => {
+  const python = cachePython(); const f = doctorFixture(); const cache = generateCache(python, join(f.paths.appRoot, "backend/routes.py"));
+  const env = { KIROCREW_PYTHON: python }; const before = f.owned();
+  const ready = f.run("status", ["--project-dir", f.project], env); const doctor = f.doctor(env);
+  expect(setupRow(ready.report, "App installed+enabled")).toMatchObject({ status: "ok", detail: expect.stringContaining("verified Python cache") });
+  expect(doctor.row("App installed+enabled")).toMatchObject({ pass: true, label: expect.stringContaining("verified Python cache") }); expect(f.owned()).toEqual(before);
+  const oldPython = process.env.KIROCREW_PYTHON; process.env.KIROCREW_PYTHON = python;
+  try {
+    const local = checkAppIdentity(f.paths.appRoot, f.paths.appRoot); expect(local.matches, local.reason).toBe(true); expect(local.reason).toContain("source freshness not established");
+    expect(() => applyApp(f.paths.appRoot, f.home, f.host)).toThrow("cannot decide source freshness");
+    for (const fault of ["unresolved", "payload"]) {
+      const selectedPython = fault === "unresolved" ? join(f.root, "absent-python") : python;
+      process.env.KIROCREW_PYTHON = selectedPython;
+      if (fault === "payload") { const bytes = readFileSync(cache); bytes[bytes.length - 1] ^= 1; writeFileSync(cache, bytes); }
+      const refused = f.owned(); let called = false;
+      const identity = checkAppIdentity(portable, f.paths.appRoot); expect(identity.matches).toBe(false);
+      if (fault === "unresolved") expect(identity.reason).toContain("Python 3.12 interpreter not resolvable; interpreter: unresolved.");
+      expect(() => applyApp(portable, f.home, () => { called = true; return ""; })).toThrow("Unverifiable Python cache"); expect(called).toBe(false);
+      const failingEnv = { KIROCREW_PYTHON: selectedPython };
+      const status = f.run("status", ["--project-dir", f.project], failingEnv); expect(status.status).toBe(1); expect(setupRow(status.report, "App installed+enabled").status).toBe("fail");
+      const failed = f.doctor(failingEnv); expect(failed.status).toBe(1); expect(failed.row("App installed+enabled").pass).toBe(false);
+      for (const text of [status.stdout, failed.stdout]) { expect(text).toContain("delete __pycache__"); expect(text).toContain("PYTHONDONTWRITEBYTECODE=1"); }
+      expect(f.owned()).toEqual(refused);
+    }
+  } finally { if (oldPython === undefined) delete process.env.KIROCREW_PYTHON; else process.env.KIROCREW_PYTHON = oldPython; }
 });

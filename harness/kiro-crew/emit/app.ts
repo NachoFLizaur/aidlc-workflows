@@ -118,12 +118,18 @@ Every child and continuation uses delegation.md's ordered child brief and delive
       description: "AI-DLC workflows with a project-local engine and Crew conductor and role agents.",
       minKiroCrewVersion: "0.6.0", agents, skills: [],
       mcpServers: MCP_FRAGMENT.mcpServers,
-      permissions: {},
+      ui: { entry: "index.mjs", pages: [{ route: "/apps/aidlc", label: "AI-DLC", icon: "Activity" }] },
+      backend: { hooks: { routes: "backend.routes:register_routes" } },
+      permissions: { api: ["/api/apps/aidlc"] },
     }),
   }, {
     path: "role-map.json", mode: 0o644,
     content: appJson({ schemaVersion: 1, promptResolution: "inline prompt bodies; no file:// prompt references", strippedMcpReferences, roles } satisfies CrewRoleMap),
   });
+  // Normalize authored page/route bytes before hashing the complete inventory.
+  for (const path of ["backend/routes.py", "ui/index.mjs"]) {
+    emissions.push({ path, mode: 0o644, content: emissionBytes(readFileSync(join(ctx.repoRoot, "harness/kiro-crew/app", path), "utf8")) });
+  }
   emissions.push({ path: "app-inventory.json", mode: 0o644, content: appJson(buildAppInventory([...predecessors, ...emissions])) });
   const violations = validateAppKit([...predecessors, ...emissions], ctx.distRoot);
   if (violations.length) throw new Error(`kiro-crew App Kit violations:\n${violations.join("\n")}`);

@@ -1126,10 +1126,12 @@ describe("t230 version-aware startup", () => {
         : route.group === "top"
         ? [route.namespace, verb]
         : [route.namespace, route.group, verb];
+      // The gateway calls project-local Bun, not the machine launcher. Progress
+      // returns before routePinPolicy; do not silently exempt other new routes.
       expect(
         launcherRouteUsesPin(argv),
         `${route.id}: ${argv.join(" ")}`,
-      ).toBe(route.pinPolicy === "pinned");
+      ).toBe(route.id === "top-progress" || route.pinPolicy === "pinned");
     }
     for (const alias of ["--claim", "--release"]) {
       expect(launcherRouteUsesPin([alias, "unit-a"]), alias).toBe(true);
@@ -2090,7 +2092,7 @@ describe("t230 dispatcher route completeness", () => {
       expect(["public", "engine", "system"]).toContain(route.namespace);
       expect(["public", "hidden", "legacy"]).toContain(route.visibility);
       expect(["none", "optional", "required"]).toContain(route.projectRequirement);
-      expect(["active", "inspect", "pinned"]).toContain(route.pinPolicy);
+      expect(["active", "inspect", "pinned", "read-only"]).toContain(route.pinPolicy);
       expect(["forbidden", "explicit-only", "interactive-bounded", "required"])
         .toContain(route.networkPolicy);
       expect(["none", "project", "machine", "project-and-machine", "user-home"])
@@ -2109,6 +2111,13 @@ describe("t230 dispatcher route completeness", () => {
       }));
     expect(ROUTES.find((route) => route.id === "top-use"))
       .toEqual(expect.objectContaining({ pinPolicy: "active", mutationScope: "machine" }));
+    expect(routePolicyFor(["engine", "progress", "--json"])).toEqual({
+      id: "top-progress", group: "top", kind: "top-passthrough", classification: "passthrough",
+      verbs: ["progress"], tool: "aidlc-progress.ts", namespace: "engine", visibility: "hidden",
+      projectRequirement: "required", mutationScope: "none", networkPolicy: "forbidden", pinPolicy: "read-only", outputModes: ["json"],
+      all: ["progress --json [--project-dir <abs>] [--space <name>] [--intent <id-or-slug>]"],
+    });
+    expect(ROUTES.filter((route) => route.pinPolicy === "read-only").map((route) => route.id)).toEqual(["top-progress"]);
     const publicPolicy = new Map(
       ROUTES.filter((route) => route.visibility === "public")
         .map((route) => [route.id, {

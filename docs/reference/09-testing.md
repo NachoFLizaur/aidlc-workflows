@@ -758,13 +758,34 @@ To add artifact assertions to an existing e2e workflow test under `tests/e2e/`:
 ## Kiro Crew tests
 
 Install the pinned Bun dependencies and generate the Crew distribution before
-running the deterministic packaging, adapter, setup, session, and protocol checks:
+running the deterministic packaging, adapter, setup, session, protocol, and progress checks:
 
 ```bash
 bun install --frozen-lockfile
 bun scripts/package.ts
-bun test tests/unit/t-kiro-crew-*.test.ts
+bun test tests/unit/t-kiro-crew-*.test.ts tests/unit/t-aidlc-progress.test.ts
 ```
+
+`tests/unit/t-kiro-crew-progress-shim.test.ts` drives the stdlib suite at
+`tests/unit/kiro-crew/test_routes.py` with isolated Python (`-I -B`), including
+real subprocess cleanup, cancellation, owner admission, selection, and read bounds.
+It needs **Python 3.12**: an absolute executable `AIDLC_TEST_PYTHON312` takes
+precedence; otherwise discovery tries PATH `python3.12`, then `python3`, checking
+for version 3.12. An invalid override fails without PATH fallback. Without an
+override or matching PATH interpreter, the driver reports one prerequisite skip.
+That skip is not route validation; supply the interpreter when checking routes.
+
+```bash
+AIDLC_TEST_PYTHON312="$(command -v python3.12)" bun test tests/unit/t-kiro-crew-progress-shim.test.ts
+```
+
+The driver checks the subprocess exit and unittest run result.
+The setup/cache-verifier cases in `tests/unit/t-kiro-crew-setup.test.ts` also
+require **CPython 3.12** through absolute `AIDLC_TEST_PYTHON312`, otherwise
+PATH `python3.12` then `python3`, each verified as 3.12. These tests **fail
+rather than skip** when it is unavailable; invalid overrides never fall back.
+This test-only discovery is separate from runtime `KIROCREW_PYTHON` and
+Crew launcher/bundled-interpreter discovery, which never searches PATH for Python.
 
 The registration/status journey additionally requires `kirocrew` and Bun on
 PATH. It creates a disposable project and Crew home, registers the emitted App
