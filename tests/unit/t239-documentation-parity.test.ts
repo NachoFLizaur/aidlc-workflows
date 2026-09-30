@@ -344,6 +344,10 @@ describe("documentation parity derives current behavior from authored implementa
     expect(crewGuide).toContain("../../reference/06-hooks-and-tools.md#kiro-crew-progress-routes");
     expect(read("docs", "reference", "06-hooks-and-tools.md")).toContain("\n## Kiro Crew progress routes\n");
     expect(read("docs", "guide", "15-troubleshooting.md")).toContain("harnesses/kiro-crew.md#progress-page");
+    expect(crewGuide).toContain("\n## In a conversation\n");
+    expect(crewGuide).toContain("../../reference/06-hooks-and-tools.md#conversation-progress");
+    expect(read("docs", "reference", "06-hooks-and-tools.md")).toContain("\n### Conversation progress\n");
+    expect(read("docs", "guide", "15-troubleshooting.md")).toContain("harnesses/kiro-crew.md#in-a-conversation");
 
     const glossaryDistribution = read("docs", "guide", "glossary.md")
       .split("\n")

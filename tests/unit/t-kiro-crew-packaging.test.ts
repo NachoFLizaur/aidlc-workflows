@@ -7,7 +7,7 @@ import type { EmitContext } from "../../scripts/manifest-types.ts";
 import { projectionFiles } from "../../core/tools/aidlc-distribution.ts";
 import emit from "../../harness/kiro-crew/emit.ts";
 import { collectAppEmissions } from "../../harness/kiro-crew/emit/app.ts";
-import { validateAppKit, type AppInventory } from "../../harness/kiro-crew/emit/app-validator.ts";
+import { buildAppInventory, validateAppKit, type AppInventory } from "../../harness/kiro-crew/emit/app-validator.ts";
 import { collectSkillEmissions, type CrewSkillsManifest } from "../../harness/kiro-crew/emit/skills.ts";
 import { parseCrewSkillFrontmatter, validateCrewSkillFrontmatter } from "../../harness/kiro-crew/emit/skill-grammar.ts";
 import type { Emission } from "../../harness/kiro-crew/emit/types.ts";
@@ -358,10 +358,12 @@ test("both channels register the progress page and routes with byte-derived inve
     const manifest = JSON.parse(readFileSync(join(app, "app.json"), "utf8"));
     expect(manifest.ui).toEqual({ entry: "index.mjs", pages: [{ route: "/apps/aidlc", label: "AI-DLC", icon: "Activity" }] });
     expect(manifest.backend).toEqual({ hooks: { routes: "backend.routes:register_routes" } });
-    expect(manifest.permissions).toEqual({ api: ["/api/apps/aidlc"] }); expect(manifest.minKiroCrewVersion).toBe("0.6.0");
+    expect(manifest.permissions).toEqual({ api: ["/api/apps/aidlc"] }); expect(manifest.minKiroCrewVersion).toBe("0.7.1");
+    expect(manifest.contributes.panelTabs).toHaveLength(1);
+    expect(manifest.contributes.panelTabs[0]).toMatchObject({ id: "progress", entry: "panel.mjs", icon: "Activity" });
     const inventory = JSON.parse(readFileSync(join(app, "app-inventory.json"), "utf8")) as AppInventory;
-    expect(inventory.files.filter(({ path }) => /^(ui|backend)\//.test(path)).map(({ path }) => path).sort()).toEqual(["backend/routes.py", "ui/index.mjs"]);
-    for (const path of ["ui/index.mjs", "backend/routes.py"]) {
+    expect(inventory.files.filter(({ path }) => /^(ui|backend)\//.test(path)).map(({ path }) => path).sort()).toEqual(["backend/routes.py", "ui/index.mjs", "ui/panel.mjs"]);
+    for (const path of ["ui/index.mjs", "backend/routes.py", "ui/panel.mjs"]) {
       const actual = readFileSync(join(app, path)); const source = readFileSync(join(REPO_ROOT, "harness/kiro-crew/app", path), "utf8").replace(/\r\n?/g, "\n").replace(/\n*$/, "\n");
       expect(actual.toString()).toBe(source); expect(inventory.files.find((file) => file.path === path)?.sha256).toBe(sha(actual));
     }
@@ -386,10 +388,105 @@ test("page, route and SDK grant validation refuses absent, escaping and overbroa
 });
 
 test("missing progress assets stop collection before replacing a previously emitted App Kit", () => {
-  for (const path of ["ui/index.mjs", "backend/routes.py"]) {
+  for (const path of ["ui/index.mjs", "backend/routes.py", "ui/panel.mjs"]) {
     const ctx = fixture(); const app = join(ctx.distRoot, "kiro-crew-app"); const before = files(app);
     rmSync(join(ctx.harnessRoot, "app", path));
     expect(() => emit(ctx)).toThrow(); expect(files(app)).toEqual(before);
     expect(readFileSync(join(ctx.distRoot, ".kiro-crew/tools/aidlc.ts"), "utf8")).toBe(readFileSync(join(runtime, ".kiro-crew/tools/aidlc.ts"), "utf8"));
+  }
+});
+
+type PanelManifest = { minKiroCrewVersion?: unknown; contributes: { panelTabs: Record<string, unknown>[] }; permissions: Record<string, unknown> } & Record<string, unknown>;
+function panelErrors(change: (app: PanelManifest) => void, raw = (text: string) => text, path = "app.json") {
+  const snapshot = files(join(runtime, "kiro-crew-app"));
+  const entry = snapshot.find((file) => file.path === path)!;
+  const app = JSON.parse(entry.content) as PanelManifest; change(app); entry.content = raw(JSON.stringify(app));
+  // Rebuild with the production collector so schema refusal cannot be explained
+  // by incidental inventory drift. No frozen digests or local validator model.
+  snapshot.find((file) => file.path === "app-inventory.json")!.content = `${JSON.stringify(buildAppInventory(snapshot), null, 2)}\n`;
+  const errors = validateAppKit(snapshot, runtime);
+  expect(errors.join("\n")).not.toContain("ownership/mode/hash mismatch");
+  return errors;
+}
+
+test("panel labels admit exactly 120 UTF-16 units and refuse blank, missing and oversized values", () => {
+  for (const field of ["title", "menuLabel", "menuDescription"]) {
+    for (const value of ["x".repeat(120), "😀".repeat(60)]) {
+      expect(panelErrors((app) => { app.contributes.panelTabs[0][field] = value; })).toEqual([]);
+    }
+    for (const value of [undefined, null, 42, "", " \n", "x".repeat(121), `${"😀".repeat(60)}x`, "😀".repeat(61)]) {
+      expect(panelErrors((app) => { app.contributes.panelTabs[0][field] = value; }).join("\n"), `${field}: ${value}`)
+        .toContain(`${field} must be non-empty and at most 120 UTF-16 units`);
+    }
+  }
+});
+
+test("panel schema allows only one progress tab, its optional icon and the exact host floor", () => {
+  for (const contributes of [undefined, null, [], {}, { panelTabs: null }, { panelTabs: [] }, { panelTabs: [null] }, { panelTabs: [{}, {}] }]) {
+    expect(panelErrors((app) => { Object.assign(app, { contributes }); }).join("\n")).toContain("exactly one tab object");
+  }
+  for (const id of [undefined, "", "other", "Progress", "1progress", "progress/", "progress\n", "a".repeat(65)]) {
+    expect(panelErrors((app) => { app.contributes.panelTabs[0].id = id; }).join("\n")).toContain("id must be progress");
+  }
+  for (const field of ["sessionControls", "commands", "fileMenuItems", "unknown"]) {
+    expect(panelErrors((app) => { Object.assign(app.contributes, { [field]: [] }); }).join("\n")).toContain("contributes must contain only panelTabs");
+  }
+  expect(panelErrors((app) => { app.contributes.panelTabs[0].unknown = true; }).join("\n")).toContain("unknown tab field unknown");
+  for (const icon of [null, 1, "", " "]) expect(panelErrors((app) => { app.contributes.panelTabs[0].icon = icon; }).join("\n")).toContain("icon must be a non-empty");
+  expect(panelErrors((app) => { delete app.contributes.panelTabs[0].icon; })).toEqual([]);
+  for (const version of [undefined, "0.6.0", "0.7.0", "0.7.2", "1.0.0", "0.7.1-beta", "invalid", 0.71]) {
+    expect(panelErrors((app) => { app.minKiroCrewVersion = version; }).join("\n")).toContain("minKiroCrewVersion must be 0.7.1");
+  }
+});
+
+test("panel entries must resolve within emitted UI assets without traversal, encoding or a redundant prefix", () => {
+  for (const entry of [undefined, "", "ui/panel.mjs", "missing.mjs", "/panel.mjs", "../panel.mjs", "a/../../panel.mjs",
+    "./panel.mjs", "a//panel.mjs", "..\\panel.mjs", "%2e%2e/panel.mjs", "https://example.invalid/panel.mjs", "panel.mjs\0"]) {
+    expect(panelErrors((app) => { app.contributes.panelTabs[0].entry = entry; }).join("\n")).toContain("entry must resolve");
+  }
+  expect(panelErrors((app) => { app.contributes.panelTabs[0].entry = "panel.mjs"; })).toEqual([]);
+  const source = files(join(runtime, "kiro-crew-app")).filter(({ path }) => path !== "ui/panel.mjs");
+  expect(validateAppKit(source, runtime).join("\n")).toContain("entry must resolve");
+});
+
+test("raw JSON validation rejects duplicate decoded keys and approval keys at every JSON site but not literal text", () => {
+  const unchanged = () => {};
+  for (const raw of [
+    (text: string) => text.replace("{", '{"contributes":{},'),
+    (text: string) => text.replace("{", '{"contrib\\u0075tes":{},'),
+    (text: string) => text.replace('"id":"progress"', '"id":"other","id":"progress"'),
+  ]) expect(panelErrors(unchanged, raw).join("\n")).toContain("duplicate JSON key");
+  for (const value of [true, false, null, [], {}]) {
+    for (const site of ["root", "permissions", "contributes", "tab", "array"]) {
+      expect(panelErrors((app) => {
+        const target = site === "permissions" ? app.permissions : site === "contributes" ? app.contributes
+          : site === "tab" ? app.contributes.panelTabs[0] : app;
+        Object.assign(target, site === "array" ? { extra: [{ sessionApproval: value }] } : { sessionApproval: value });
+      }).join("\n")).toContain("forbidden sessionApproval");
+    }
+  }
+  for (const { path } of files(join(runtime, "kiro-crew-app")).filter(({ path }) => path.endsWith(".json") && path !== "app-inventory.json")) {
+    expect(panelErrors(unchanged, (text) => text.replace("{", '{"overwritten":{"session\\u0041pproval":false},"overwritten":{},'), path).join("\n"))
+      .toContain(`${path}: forbidden sessionApproval`);
+  }
+  expect(panelErrors((app) => { app.description = 'Literal "sessionApproval": true and "contributes": {} are not keys.'; })).toEqual([]);
+});
+
+test("panel and raw-key violations abort real emission before replacing the app or project engine", () => {
+  const ctx = fixture(); const app = join(ctx.distRoot, "kiro-crew-app"); const before = files(app);
+  const engine = readFileSync(join(ctx.distRoot, ".kiro-crew/tools/aidlc.ts"));
+  for (const [prefix, expected] of [
+    ['"contributes":{},', "duplicate JSON key contributes"],
+    ['"permissions":{"session\\u0041pproval":true},', "forbidden sessionApproval"],
+    ['"extra":[{"sessionApproval":false}],', "forbidden sessionApproval"],
+  ]) {
+    const script = join(ctx.repoRoot, "invalid-app.ts");
+    writeFileSync(script, `import {mock} from 'bun:test';
+const path=${JSON.stringify(join(REPO_ROOT, "harness/kiro-crew/emit/app-validator.ts"))};const real=await import(path);const build=real.buildAppInventory;
+mock.module(path,()=>({...real,buildAppInventory:entries=>{const app=entries.find(e=>e.path==='app.json');app.content=app.content.replace('{','{'+${JSON.stringify(prefix)});return build(entries);}}));
+const {default:emit}=await import(${JSON.stringify(join(REPO_ROOT, "harness/kiro-crew/emit.ts"))});emit({...${JSON.stringify(ctx)},substituteToken:text=>text.replaceAll('{{HARNESS_DIR}}','.kiro-crew').replaceAll('{{TOOL_PREFIX}}','bun .kiro-crew/tools/')});`);
+    const result = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: remainingOperationTimeoutMs(NATIVE_STARTUP_TIMEOUT_MS) });
+    expect(result.error).toBeUndefined(); expect(result.status).not.toBe(0); expect(result.stderr).toContain(expected);
+    expect(files(app)).toEqual(before); expect(readFileSync(join(ctx.distRoot, ".kiro-crew/tools/aidlc.ts"))).toEqual(engine);
   }
 });

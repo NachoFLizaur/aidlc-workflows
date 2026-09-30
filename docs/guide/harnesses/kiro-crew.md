@@ -28,8 +28,9 @@ agent installation instructions.
 
 ## Prerequisites
 
-- **Kiro Crew ≥0.6.0**, with `kirocrew` available on PATH and an interactive
-  dashboard session in which you can select a project and agent.
+- **Kiro Crew ≥0.7.1**, with `kirocrew` available on PATH and an interactive
+  dashboard session in which you can select a project and agent. This raised
+  host minimum applies to the **whole App Kit**, not just its conversation panel.
 - **Bun on PATH** for setup. Setup pins its absolute Bun executable into the
   registered hooks and MCP command. The bridge and hook entry still require
   Bun when the native `aidlc` executable is installed.
@@ -57,7 +58,7 @@ The engine and the host shell have different owners:
 
 | Location | Contents |
 | --- | --- |
-| `$KIROCREW_HOME/apps/aidlc/` | Registered App Kit: agents, resources, setup, hooks, launcher, MCP bridge, progress page, and gateway routes |
+| `$KIROCREW_HOME/apps/aidlc/` | Registered App Kit: agents, resources, setup, hooks, launcher, MCP bridge, progress page, conversation panel, and gateway routes |
 | `your-project/.kiro-crew/` | Engine, adapter, personas, protocols, skills, tools, and install metadata |
 | `your-project/.kiro-crew/AGENTS.md` | Internal onboarding, explicitly read by the conductor; not a root instruction file |
 | `your-project/aidlc/` | Shared spaces, intents, memory, and workflow records |
@@ -384,6 +385,55 @@ PATH Python lookup. Normal installs need no extra interpreter setup; otherwise
 set `KIROCREW_PYTHON` to a trusted absolute executable.
 No cache means no interpreter lookup.
 See the [route contract](../../reference/06-hooks-and-tools.md#kiro-crew-progress-routes) for bounds and errors.
+
+## In a conversation
+
+In an ordinary dashboard chat, open the right panel's **+** menu and choose
+**AI-DLC progress**. This adds an **AI-DLC** tab; it does not open automatically.
+The App Kit must be installed, trusted, and enabled. Use your owner dashboard
+session, not a query-token link; cookie presence alone does not establish access.
+
+Under **Conversation progress**, a bound intent appears as **This conversation's
+intent**, with the same stages, counts, blockers, and provenance as the page.
+There are **no project or intent pickers**: it follows this conversation's binding.
+If unbound, select the configured project and message **aidlc-crew** in this chat;
+its first `aidlc_status` call binds the conversation. Opening the panel alone
+binds nothing and sends no conversation turn.
+
+A **census** lists intents by space when the project is bound but no intent is
+selected, including ineligible records and their reasons. An absent engine
+binding, null intent, or registry-only target can produce it. Nothing auto-selects,
+even with one eligible intent; use the chat's normal workflow navigation.
+Linked or channel slots have no special resolution and may appear unbound.
+
+**Conversation &lt;ref&gt;** is a short correlation reference, not proof of identity
+or binding authority: it is guessable and may collide. It comes from the settled
+response and is hidden while loading or refreshing; some refusals have no reference.
+To compare locally, first associate the chat independently with its slot, for
+example by comparing `$KIROCREW_HOME/open_slots.json` keys before and after creating
+that chat. Hash the exact UTF-8 `dashboard:<slot>` string with SHA-256 and compare
+its first eight lowercase hex characters. Include the prefix, with no newline,
+trimming, or backend session substitution. Do not infer a slot from the chat title
+or list order; an ambiguous association remains unverified even if references match.
+
+**Conversation binding changed** (`BINDING_CHANGED`) clears the old progress;
+**Retry** requests a fresh read. Any refusal or changed binding revision discards
+the previous snapshot, unlike the page's stale last-good view; the error footer
+says **No progress is displayed.** This is a read-time
+check, not instant rebind notification, and it never repairs a binding.
+
+Polling follows the page's five-second success cadence and failure backoff.
+New requests pause while the document is hidden or Crew marks the tab inactive;
+resuming requests an immediate refresh after any in-flight request settles.
+Each panel and the page poll independently.
+
+**Observe-only and attribution:** the panel shows the conversation Crew reports
+for this tab, not server-attested identity. It runs under the same unsandboxed
+local-app trust as the page and never writes AI-DLC state. Provider observations
+are for this exact conversation; an absent or unknown observation reads **not
+currently recorded**, not a conflict or permission to execute. See the
+[session route contract](../../reference/06-hooks-and-tools.md#conversation-progress)
+for authentication, reference presence, and diagnostic log/audit side effects.
 
 ## Update and removal
 

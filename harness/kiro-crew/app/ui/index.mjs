@@ -1,23 +1,25 @@
 /**
- * One authored ESM entry, no props, build step or workflow actions.
+ * Shared ESM rendering, no props, build step or workflow actions.
  * The browser loads only import-map modules. The environment check is evaluated at
  * module load, before host imports: DOM-free consumers get the same pure exports
  * without React or SDK stubs. It is not an authorization guard or a runtime fallback.
  * HTTP authorization belongs to routes.py; the SDK allowlist is client-side only.
  */
-let React, useAppApi, useTheme, icons;
+let React, useAppApi, useAppInfo, useTheme, icons;
 if (typeof window !== "undefined") {
   const [react, sdk, lucide] = await Promise.all([
     import("react"), import("@kirocrew/app-sdk"), import("lucide-react"),
   ]);
   React = react;
-  ({ useAppApi, useTheme } = sdk);
+  ({ useAppApi, useAppInfo, useTheme } = sdk);
   // These five named exports exist in Crew 0.6.0's vendor/lucide-react.mjs.
   const { Check, Loader2, Clock, ArrowRight, AlertTriangle } = lucide;
   icons = { completed: Check, active: Loader2, pending: Clock, skipped: ArrowRight, blocked: AlertTriangle };
 }
 
 export const DISCLOSURE = "Observe-only is an application guarantee: this route runs unsandboxed inside the Crew gateway under the App Kit's local-app trust and never writes AIDLC state.";
+export const ATTRIBUTION = "Attribution: this panel shows the conversation Crew reports for this tab (host-UI attribution; owner session required).";
+export const PROVIDER_NOT_RECORDED = "not currently recorded";
 export const POLL_MS = 5_000;
 export const MAX_BACKOFF_MS = 60_000;
 export const GUARD_MESSAGE = "Progress unavailable — the App Kit route guard is not available in this Crew build";
@@ -48,7 +50,8 @@ const stageValid = value => object(value) && text(value.slug) && STAGES.includes
 function selectedValid(value, intents) {
   return object(value) && text(value.displayName) && optionalText(value.description)
     && optionalText(value.scope) && optionalText(value.status) && optionalText(value.activeStage)
-    && intents.some(intent => intent.eligible && intent.space === value.space && intent.id === value.id)
+    && text(value.space) && text(value.id)
+    && (intents === undefined || intents.some(intent => intent.eligible && intent.space === value.space && intent.id === value.id))
     && Array.isArray(value.phases) && value.phases.every(phase => object(phase) && text(phase.name)
       && ["completed", "active", "pending"].includes(phase.status)
       && Array.isArray(phase.stages) && phase.stages.every(stageValid))
@@ -103,6 +106,48 @@ export function decodeProgress(status, body) {
   return body;
 }
 
+/** Session envelope is the oracle, decoded before reducer publication. Unlike
+ * the page, ok has no census to join: the shim already resolved the exact intent.
+ * Refusals expose diagnostics/provider and a valid opaque revision, never selected.
+ * References are correlation aids only: exactly eight lowercase hex, checked
+ * before publication on success/refusal; malformed references are absent. Invalid
+ * envelopes fail closed with no reference. No identity cache or disabling option.
+ * Unknown/malformed envelopes fail closed; no fallback selection or bypass.
+ */
+export function decodeSessionProgress(status, body) {
+  const bindingRevision = text(body?.bindingRevision) && /^[a-f0-9]{16}$/.test(body.bindingRevision)
+    ? body.bindingRevision : undefined;
+  const conversationRef = text(body?.conversationRef) && body.conversationRef.length === 8 && /^[0-9a-f]{8}$/.test(body.conversationRef)
+    ? body.conversationRef : undefined;
+  if (status !== 200 || ["error", "unavailable"].includes(body?.state)) {
+    const result = failure(status, body);
+    return { ...result, state: body?.state === "unavailable" ? "unavailable" : result.state, bindingRevision, conversationRef };
+  }
+  if (!object(body) || body.schemaVersion !== 1 || body.disclosure !== DISCLOSURE
+    || !date(body.generatedAt) || !["ok", "census", "unbound", "unsupported"].includes(body.state)
+    || (body.state !== "ok" && body.selected !== undefined)) return failure(status, null);
+  const common = { state: body.state, generatedAt: body.generatedAt, disclosure: DISCLOSURE, conversationRef };
+  if (body.state === "unbound") return text(body.guidance) ? { ...common, guidance: body.guidance } : failure(status, null);
+  if (body.state === "unsupported") return text(body.reason) ? { ...common, reason: body.reason } : failure(status, null);
+  if (!bindingRevision || !object(body.project) || !text(body.project.displayName)
+    || body.project.stampValid !== true || !providerValid(body.provider)
+    || (body.state === "ok" ? !selectedValid(body.selected) : !Array.isArray(body.census) || !body.census.every(intentValid))) {
+    return failure(status, null);
+  }
+  return { ...common, bindingRevision,
+    project: { displayName: body.project.displayName, stampValid: true }, provider: body.provider,
+    ...(body.state === "ok" ? { selected: body.selected } : { census: body.census }),
+  };
+}
+
+/** Display oracle: only the currently settled decoder snapshot. Read at render;
+ * omit while loading (including refresh), and never remember a previous reference
+ * through a no-reference refusal or SDK failure. No fallback/override; not auth.
+ */
+export function conversationReference(state) {
+  return state.inFlight ? undefined : (state.error ?? state.view)?.conversationRef;
+}
+
 /** SDK 0.6.0 returns parsed success bodies but throws Error(`API <status>: <text>`).
  * Decode that transport at the boundary, before the union decoder. Non-JSON auth
  * pages and network/allowlist errors get safe text, never HTML or inferred data.
@@ -123,7 +168,7 @@ export function decodeSdkError(error, decode) {
   } });
 }
 
-async function getDecoded(api, path, decode) {
+export async function getDecoded(api, path, decode) {
   try { return decode(200, await api.get(path)); }
   catch (error) { return decodeSdkError(error, decode); }
 }
@@ -141,9 +186,17 @@ export function partitionBlockers(selected) {
   return { selected: [...(selected?.blockers ?? [])], project: [...(selected?.unattributedBlockers ?? [])] };
 }
 
+/** Provider oracle: exact-key presence and normalized label, read at render.
+ * False presence or unknown means no live observation, never disagreement. The
+ * project aggregate omits presence; its known labels remain usable. Only two
+ * known, disagreeing labels raise a conflict; source conflict flags are ignored.
+ * No override; display only, never execution admission.
+ */
 export function combineLabels(readerBackend, provider) {
   const recorded = readerBackend?.asRecorded ?? null;
   const observed = provider?.label ?? null;
+  const unavailable = provider?.present === false || observed === "unknown";
+  const known = label => LABELS.includes(label) && label !== "unknown";
   const sources = [];
   if (recorded === "codex" || readerBackend?.codexAssociated) {
     sources.push(readerBackend?.codexAssociated?.source ?? "project-binding (recorded, not live)");
@@ -152,26 +205,26 @@ export function combineLabels(readerBackend, provider) {
   return {
     recorded: `Backend as recorded: ${recorded ?? "not recorded"} (not live identity)`,
     recordedSource: readerBackend?.source ?? "no recorded source",
-    provider: `Crew provider (session map): ${observed ?? "not available"}`,
+    provider: `Crew provider (session map): ${unavailable ? PROVIDER_NOT_RECORDED : observed ?? "not available"}`,
     providerSource: provider?.source ?? "no provider observation",
-    conflict: Boolean(readerBackend?.conflict || provider?.conflict
-      || (recorded !== null && observed !== null && recorded !== observed)),
+    conflict: !unavailable && known(recorded) && known(observed) && recorded !== observed,
     codex: sources.length ? `Codex-associated (source: ${[...new Set(sources)].join("; ")})` : null,
   };
 }
 
-export function initialState(now = 0, hidden = false) {
+export function initialState(now = 0, hidden = false, active = true, session = false) {
   return {
     projects: null, warnings: [], projectId: null, intent: null, intents: [], view: null,
-    error: null, lastUpdated: null, failures: 0, nextAt: now, hidden,
+    error: null, lastUpdated: null, failures: 0, nextAt: now, hidden, active, session, bindingRevision: null,
     inFlight: false, generation: 0, requestGeneration: null, immediate: false,
   };
 }
 
 export function planPolls(state, now) {
   const waitMs = Math.max(0, state.nextAt - now);
-  return { poll: !state.hidden && !state.inFlight && waitMs === 0,
-    waitMs, nextSeconds: Math.ceil(waitMs / 1000), paused: state.hidden };
+  const paused = state.hidden || state.active === false;
+  return { poll: !paused && !state.inFlight && waitMs === 0,
+    waitMs, nextSeconds: Math.ceil(waitMs / 1000), paused };
 }
 
 function clearSelection(state, now) {
@@ -183,8 +236,12 @@ function clearSelection(state, now) {
  * Poll/selection oracle: inFlight, visibility and generation, read BEFORE each
  * request and BEFORE accepting its result. A switch clears all selected data but
  * retains the flight lock until settlement; stale generations cannot publish.
- * Hidden pauses new work, not an already running request. Retry/visible queue an
- * immediate refresh, never clear the lock. No overlap/identity guard bypass.
+ * Hidden/inactive pauses new work, not an already running request. Retry/resume
+ * queue an immediate refresh, never clear the lock. For session consumers, the
+ * opaque revision and response state are checked before publication: a changed
+ * revision invalidates the old view, and EVERY refusal discards selected data
+ * even with the same revision (a refusal revision is not retention authority).
+ * Page consumers retain their last-good-on-error behavior. No guard bypass.
  */
 export function reduce(state, action) {
   switch (action.type) {
@@ -195,6 +252,11 @@ export function reduce(state, action) {
       return { ...state, hidden: action.hidden,
         nextAt: action.hidden ? state.nextAt : action.now,
         immediate: state.immediate || (!action.hidden && state.inFlight) };
+    case "activity":
+      if (state.active === action.active) return state;
+      return { ...state, active: action.active,
+        nextAt: action.active === false ? state.nextAt : action.now,
+        immediate: state.immediate || (action.active !== false && state.inFlight) };
     case "retry":
       return { ...state, failures: 0, nextAt: action.now, immediate: state.inFlight };
     case "project":
@@ -216,8 +278,15 @@ export function reduce(state, action) {
     }
     case "settle": {
       if (!state.inFlight || action.generation !== state.requestGeneration) return state;
-      const next = { ...state, inFlight: false, requestGeneration: null, immediate: false };
+      let next = { ...state, inFlight: false, requestGeneration: null, immediate: false };
       if (action.generation !== state.generation || !action.result) return { ...next, nextAt: action.now };
+      if (state.session) {
+        const bindingRevision = action.result.bindingRevision ?? null;
+        if (bindingRevision !== state.bindingRevision || action.result.state !== "ok") {
+          next = { ...next, view: null, intent: null, intents: [], lastUpdated: null };
+        }
+        next = { ...next, bindingRevision };
+      }
       if (["error", "unavailable"].includes(action.result.state)) {
         const failures = state.failures + 1;
         // Failure n=1..5 => 5,10,20,40,60 seconds; later failures stay capped.
@@ -232,83 +301,116 @@ export function reduce(state, action) {
   }
 }
 
-// Serialize whole refreshes even across unmount/remount. No client timeout or abort:
-// the SDK promise must settle (including reader process cleanup) before reuse.
-// An unmounted/hidden page may finish its current GET but cannot start the next.
-let transportTail = Promise.resolve();
-function serialize(job) {
-  const pending = transportTail.then(job);
-  transportTail = pending.catch(() => {});
-  return pending;
+/** Per-instance scheduling. The reducer's flight/generation oracle is read before
+ * invoking a fetcher and again before accepting its settlement. Visibility and
+ * host activity gate new requests only, not an already-running settlement.
+ * stop invalidates publication, NOT the flight lock; restart of the same hook
+ * (including effect replay) waits for settlement. Other instances never wait on
+ * this one. No timeout/abort unlock: the SDK must settle after server cleanup.
+ * No disabling option; fetchers must use canRequest before a subsequent GET.
+ */
+export function createPollScheduler(fetcher, { now = Date.now, hidden = false, active = true, session = false } = {}) {
+  let state = initialState(now(), hidden, active, session);
+  let stopped = false;
+  let publish = () => {};
+  const getState = () => state;
+  const send = action => {
+    const next = reduce(state, { ...action, now: action.now ?? now() });
+    if (next !== state) { state = next; if (!stopped) publish(next); }
+  };
+  return {
+    getState, send,
+    start(listener) { publish = listener; stopped = false; send({ type: "retry" }); },
+    stop() { stopped = true; state = { ...state, generation: state.generation + 1 }; },
+    tick() {
+      if (stopped || !planPolls(state, now()).poll) return;
+      send({ type: "tick" });
+      const generation = state.generation;
+      const current = () => !stopped && state.generation === generation;
+      const canRequest = () => current() && !planPolls(state, now()).paused;
+      return (async () => {
+        let result;
+        try { result = await fetcher({ getState, send, generation, current, canRequest }); }
+        catch (error) { result = decodeSdkError(error, state.session ? decodeSessionProgress : decodeProgress); }
+        finally { send({ type: "settle", generation, result }); }
+      })();
+    },
+  };
 }
 
-function useProgress(api) {
-  const [snapshot, setSnapshot] = React.useState(() => initialState());
+/** Host pause oracle: document.hidden and the latest useAppInfo activity are read
+ * before pumping and before a fetcher's subsequent GET, even if an activity
+ * effect has not yet run. Hidden documents or an inactive host pause new work;
+ * resuming queues an immediate pump without unlocking a flight. No bypass.
+ */
+export function usePolling(fetcher, { active = true, session = false } = {}) {
+  const fetcherRef = React.useRef(fetcher);
+  fetcherRef.current = fetcher;
+  const activeRef = React.useRef(active);
+  activeRef.current = active;
+  const [scheduler] = React.useState(() => createPollScheduler(context => fetcherRef.current({
+    ...context,
+    canRequest: () => context.canRequest() && !document.hidden && activeRef.current !== false,
+  }), {
+    hidden: document.hidden, active, session,
+  }));
+  const [snapshot, setSnapshot] = React.useState(scheduler.getState);
   const [now, setNow] = React.useState(() => Date.now());
   const controls = React.useRef(() => {});
   React.useEffect(() => {
-    let state = initialState(Date.now(), document.hidden);
     let stopped = false;
     let timer;
-    const send = action => {
-      if (stopped) return;
-      const next = reduce(state, action);
-      if (next !== state) { state = next; setSnapshot(next); }
-    };
-    const current = generation => !stopped && state.generation === generation;
-    async function refresh(generation) {
-      let result;
-      try {
-        if (!current(generation) || document.hidden) return;
-        result = await getDecoded(api, PROJECTS_PATH, decodeProjects);
-        if (!current(generation) || ["error", "unavailable"].includes(result.state)) return;
-        send({ type: "census", result, generation, now: Date.now() });
-        if (!state.projectId) return;
-        // Hidden/switch after census must not start another HTTP request.
-        if (document.hidden) { result = undefined; return; }
-        const intent = state.intent;
-        result = await getDecoded(api, progressPath(state.projectId, intent), decodeProgress);
-        if (result.state === "ok" && intent
-          && (result.selected.space !== intent.space || result.selected.id !== intent.id)) {
-          result = failure(200, { error: { code: "SELECTION_MISMATCH", message: "The response does not match the selected intent." } });
-        }
-      } catch (error) {
-        result = decodeSdkError(error, decodeProgress);
-      } finally {
-        send({ type: "settle", generation, result, now: Date.now() });
-      }
-    }
+    scheduler.start(setSnapshot);
     function pump() {
       if (stopped) return;
       clearTimeout(timer);
       const time = Date.now();
       setNow(time);
-      if (state.hidden !== document.hidden) send({ type: "visibility", hidden: document.hidden, now: time });
-      if (planPolls(state, time).poll) {
-        send({ type: "tick", now: time });
-        const generation = state.generation;
-        void serialize(() => refresh(generation)).finally(pump);
-      }
-      const wait = state.hidden || state.inFlight ? 1000 : Math.min(1000, planPolls(state, time).waitMs);
+      if (scheduler.getState().hidden !== document.hidden) scheduler.send({ type: "visibility", hidden: document.hidden });
+      if (scheduler.getState().active !== activeRef.current) scheduler.send({ type: "activity", active: activeRef.current });
+      const pending = scheduler.tick();
+      if (pending) void pending.finally(pump);
+      const state = scheduler.getState();
+      const wait = planPolls(state, time).paused || state.inFlight ? 1000 : Math.min(1000, planPolls(state, time).waitMs);
       timer = setTimeout(pump, wait);
     }
-    controls.current = action => { send({ ...action, now: Date.now() }); pump(); };
+    controls.current = action => { scheduler.send(action); pump(); };
     const visibility = () => controls.current({ type: "visibility", hidden: document.hidden });
     document.addEventListener("visibilitychange", visibility);
-    setSnapshot(state);
     pump();
     return () => {
       stopped = true;
+      scheduler.stop();
       clearTimeout(timer);
       controls.current = () => {};
       document.removeEventListener("visibilitychange", visibility);
     };
-  }, [api]);
+  }, [scheduler]);
+  React.useEffect(() => { controls.current({ type: "activity", active }); }, [active]);
   return [snapshot, now, action => controls.current(action)];
 }
 
+function useProgress(api, active) {
+  return usePolling(async ({ getState, send, generation, current, canRequest }) => {
+    if (!canRequest()) return;
+    let result = await getDecoded(api, PROJECTS_PATH, decodeProjects);
+    if (!current() || ["error", "unavailable"].includes(result.state)) return result;
+    send({ type: "census", result, generation });
+    if (!getState().projectId) return result;
+    // Hidden/inactive/switch after census must not start another HTTP request.
+    if (document.hidden || !canRequest()) return;
+    const { projectId, intent } = getState();
+    result = await getDecoded(api, progressPath(projectId, intent), decodeProgress);
+    if (result.state === "ok" && intent
+      && (result.selected.space !== intent.space || result.selected.id !== intent.id)) {
+      return failure(200, { error: { code: "SELECTION_MISMATCH", message: "The response does not match the selected intent." } });
+    }
+    return result;
+  }, { active });
+}
+
 // Scope every selector; inherit host typography/tokens, with mode-aware fallbacks.
-const CSS = `
+export const CSS = `
 .aidlc-progress { --ap-bg:#12141a; --ap-card:#181b22; --ap-text:#e4e4e7; --ap-line:#454853; --ap-warn:#f2c878; color-scheme:dark; color:var(--text,var(--ap-text)); background:var(--bg,var(--ap-bg)); font:400 14px/1.6 var(--font-body,system-ui,sans-serif); padding:clamp(16px,3vw,40px); width:100%; min-width:0; min-height:0; flex:1; overflow:auto; overflow-wrap:anywhere; }
 .aidlc-progress[data-mode="light"] { --ap-bg:#fafafa; --ap-card:#fff; --ap-text:#24262b; --ap-line:#b7bcc5; --ap-warn:#805000; color-scheme:light; }
 .aidlc-progress * { box-sizing:border-box; }
@@ -412,15 +514,23 @@ function Provenance({ backend, provider }) {
   return h("section", { className: "ap-panel ap-labels" }, h("h2", null, "Labels and provenance"),
     h("div", null, h("p", null, labels.recorded), h("p", { className: "ap-detail" }, `Source: ${labels.recordedSource}`)),
     h("div", null, h("p", null, labels.provider), h("p", { className: "ap-detail" }, `Source: ${labels.providerSource}`)),
-    labels.conflict && h("p", { className: "ap-warning" }, "Conflict — recorded backend and provider labels disagree, or a source reports conflicting observations."),
+    labels.conflict && h("p", { className: "ap-warning" }, "Conflict — recorded backend and provider labels disagree."),
     labels.codex && h("p", null, labels.codex),
     h("p", { className: "ap-detail" }, "Labels are observations, not execution authorization. Display does not admit Codex."));
+}
+
+export function ProgressBody({ state }) {
+  const selected = state.view?.state === "ok" ? state.view.selected : null;
+  const provider = state.view?.provider ?? state.error?.provider;
+  return h(React.Fragment, null,
+    selected && h(Overview, { selected }),
+    h(Provenance, { backend: selected?.backend, provider }));
 }
 
 /** Remedies supplement, never replace, decoded diagnostics. This is display-only:
  * the route/decoder decisions and the reducer's retention rules remain the oracle.
  */
-function ErrorDetails({ error }) {
+export function ErrorDetails({ error }) {
   const remedy = ["FORBIDDEN", "HTTP_401", "HTTP_403"].includes(error.code) ? ACCESS_REMEDY
     : ["INVALID_STAMP", "MATERIALIZATION_INVALID", "SDK_NOT_PERMITTED"].includes(error.code) ? SETUP_REMEDY : null;
   return h(React.Fragment, null,
@@ -428,21 +538,37 @@ function ErrorDetails({ error }) {
     h("p", null, h("span", { className: "ap-mono" }, error.code), " · ", error.message));
 }
 
-/** Display oracle: the accepted view's selected progress, read at render. An
- * error without selected progress must not claim a stale snapshot. No override.
- * Live text depends only on the settled outcome, not the clock or flight state,
- * so countdown ticks and repeated outcomes stay silent.
+/** Display oracle: the accepted view, read at render using ProgressBody's selected
+ * predicate. An error without selected progress must not claim a stale snapshot.
+ * No override. The live text depends only on the settled outcome, not the clock
+ * or flight state, so countdown ticks and repeated outcomes stay silent.
  */
+export function renderFooter({ state, now, send, disclosure = DISCLOSURE, attribution = false }) {
+  const polls = planPolls(state, now);
+  const error = state.error;
+  const retainedProgress = state.view?.state === "ok" && state.view.selected;
+  const refresh = state.hidden ? "refresh paused while hidden" : state.active === false ? "refresh paused while inactive"
+    : state.inFlight ? "refreshing…" : `next refresh in ${polls.nextSeconds} s`;
+  return h("footer", { className: "ap-panel" },
+    h("p", { className: "ap-announcement", "aria-live": "polite", "aria-atomic": true },
+      error ? "Progress could not be refreshed." : state.lastUpdated ? "Progress refreshed." : ""),
+    h("div", { className: "ap-row" },
+      h("div", null,
+        h("p", null, "Last updated ", state.lastUpdated ? h("time", { dateTime: state.lastUpdated }, new Date(state.lastUpdated).toLocaleTimeString()) : "—", ` · ${refresh}`),
+        error && h("p", { className: "ap-warning" }, retainedProgress
+          ? "Showing the last successful snapshot; it may be out of date." : "No progress is displayed.")),
+      h("button", { type: "button", disabled: state.inFlight, onClick: () => send({ type: "retry" }), "aria-label": "Retry progress refresh" }, "Retry")),
+    h("p", { className: "ap-disclosure" }, disclosure),
+    attribution && h("p", { className: "ap-disclosure" }, attribution));
+}
+
 export default function ProgressPage() {
   const api = useAppApi();
   const { mode } = useTheme();
-  const [state, now, send] = useProgress(api);
+  const { active } = useAppInfo();
+  const [state, now, send] = useProgress(api, active);
   const id = React.useId();
-  const polls = planPolls(state, now);
-  const selected = state.view?.state === "ok" ? state.view.selected : null;
-  const provider = state.view?.provider ?? state.error?.provider;
   const error = state.error;
-  const refresh = state.hidden ? "refresh paused while hidden" : state.inFlight ? "refreshing…" : `next refresh in ${polls.nextSeconds} s`;
   return h("main", { className: "aidlc-progress", "data-mode": mode === "light" ? "light" : "dark" },
     h("style", null, CSS),
     h("div", { className: "ap-content" },
@@ -466,16 +592,6 @@ export default function ProgressPage() {
       !error && state.projectId && !state.view && h("p", null, "Loading selected progress…"),
       state.view?.state === "selection-required" && h("section", { className: "ap-notice" }, h("h2", null, "Choose an intent"), h("p", null, "Several intents are eligible. Select a space and intent above; no progress is shown until you choose.")),
       state.view?.state === "empty" && state.projectId && h("p", { className: "ap-notice" }, "No eligible intents in this project. No progress is available."),
-      selected && h(Overview, { selected }),
-      h(Provenance, { backend: selected?.backend, provider }),
-      h("footer", { className: "ap-panel" },
-        h("p", { className: "ap-announcement", "aria-live": "polite", "aria-atomic": true },
-          error ? "Progress could not be refreshed." : state.lastUpdated ? "Progress refreshed." : ""),
-        h("div", { className: "ap-row" },
-          h("div", null,
-            h("p", null, "Last updated ", state.lastUpdated ? h("time", { dateTime: state.lastUpdated }, new Date(state.lastUpdated).toLocaleTimeString()) : "—", ` · ${refresh}`),
-            error && h("p", { className: "ap-warning" }, selected
-              ? "Showing the last successful snapshot; it may be out of date." : "No progress is displayed.")),
-          h("button", { type: "button", disabled: state.inFlight, onClick: () => send({ type: "retry" }), "aria-label": "Retry progress refresh" }, "Retry")),
-        h("p", { className: "ap-disclosure" }, DISCLOSURE))));
+      h(ProgressBody, { state }),
+      h(renderFooter, { state, now, send })));
 }

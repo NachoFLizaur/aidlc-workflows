@@ -1,7 +1,7 @@
 """Owner-guarded, bounded progress reads through the installed project engine.
 
 Observe-only is an application guarantee, not a sandbox: project records are
-read-only. A disposable reader HOME and host-managed logs/bytecode may be written.
+read-only. A disposable reader HOME and host-managed logs/audit/bytecode may be written.
 """
 from __future__ import annotations
 
@@ -10,6 +10,7 @@ import ctypes
 import errno
 import hashlib
 import json
+import logging
 import os
 import re
 import selectors
@@ -105,7 +106,22 @@ async def _offload(fn, *args):
         raise
 
 
-def _guarded(handler):
+def _owner_cookie_request(request):
+    """Admission oracle: Crew's validated identity/provenance, not cookie presence.
+
+    Read before any session state or execution on every request. All five
+    middleware fields must be present/non-None; only literal dashboard True and
+    query-token False plus the live owner predicate admit. Missing evidence or
+    non-owner => audited 403 via _guarded; predicate failure => 503. No bypass.
+    The SDK header remains host-UI attribution, NOT server attestation.
+    """
+    return all(request.get(k) is not None for k in (
+        "user", "app", "auth_token", "is_dashboard_user", "auth_from_query_token")) and (
+        request.get("is_dashboard_user") is True and
+        request.get("auth_from_query_token") is False and is_owner_dashboard_request(request))
+
+
+def _guarded(handler, *, owner_cookie=False):
     """Admission oracle: imports, live Crew enabled state, then owner predicate.
 
     Checked on EVERY request before data reads/spawn; missing imports or a
@@ -117,7 +133,8 @@ def _guarded(handler):
             return _response(_error("GUARD_UNAVAILABLE"))
         try:
             enabled = await asyncio.to_thread(is_app_enabled, ctx.name)
-            allowed = enabled and is_owner_dashboard_request(request)
+            allowed = enabled and (_owner_cookie_request(request) if owner_cookie else
+                                   is_owner_dashboard_request(request))
         except Exception:
             return _response(_error("GUARD_UNAVAILABLE"))
         if not allowed:
@@ -130,8 +147,17 @@ def _guarded(handler):
 
 
 def register_routes(ctx) -> list[AppRoute]:
+    """Enable INFO on Crew's mutable app-owned logger before serving requests.
+
+    Crew supplies kirocrew.app.aidlc, otherwise inheriting root WARNING.
+    Only this child level changes; host levels, handlers and propagation stay
+    untouched. Host handler filters can still suppress INFO (notably detached
+    default logging); the optional audit SDK is the independent diagnostic sink.
+    """
+    ctx.logger.setLevel(logging.INFO)
     return [AppRoute("GET", "/projects", _guarded(_projects)),
-            AppRoute("GET", "/progress", _guarded(_progress))]
+            AppRoute("GET", "/progress", _guarded(_progress)),
+            AppRoute("GET", "/session-progress", _guarded(_session_progress, owner_cookie=True))]
 
 
 def _same(a, b):
@@ -391,9 +417,12 @@ def _providers(reader, receipt, projects):
 
     Read on each request; no provider guessing from titles/config/binding labels.
     Missing map => unknown; malformed/unsafe/over-budget present map fails closed.
-    Only label/source/conflict leave this join. Mixed labels => unknown+conflict;
+    Project responses expose label/source/conflict. Mixed labels => unknown+conflict;
     one observation => that label (including codex), never execution admission.
     Missing entries count as unknown; no bypass and neither record is modified.
+    Return the same bounded join so the session caller can report exact-key
+    presence, including unknown-valued entries, without a second map read.
+    Project callers retain their aggregate label/source/conflict contract.
     """
     try:
         mapping = reader.document(Path(receipt["crewHome"]).resolve(strict=True) / "session_map.json",
@@ -415,6 +444,7 @@ def _providers(reader, receipt, projects):
         observed = {joined.get(key, "unknown") for key in record["keys"]}
         record["provider"] = {"label": next(iter(observed)) if len(observed) == 1 else "unknown",
                               "source": "crew-session-map", "conflict": len(observed) > 1}
+    return joined
 
 
 def _selection(query):
@@ -593,7 +623,7 @@ def _exited_unreaped(pid):
     return ctypes.cast(info, ctypes.POINTER(ctypes.c_int))[3] == pid
 
 
-def _run_reader(argv, project, cancelled):
+def _run_reader(argv, project, cancelled, *, deadline=None):
     """Concurrent nonblocking pipe reads: limits apply before JSON decoding.
 
     Monotonic deadline starts before Popen; both streams have independent caps.
@@ -604,7 +634,9 @@ def _run_reader(argv, project, cancelled):
     with tempfile.TemporaryDirectory(prefix="aidlc-progress-", dir="/tmp") as home:
         if cancelled.is_set():
             raise Failure("READER_CANCELLED")
-        deadline = time.monotonic() + READER_TIMEOUT
+        deadline = min(time.monotonic() + READER_TIMEOUT, deadline) if deadline is not None else time.monotonic() + READER_TIMEOUT
+        if time.monotonic() >= deadline:
+            raise Failure("READER_TIMEOUT", 504)
         try:
             process = subprocess.Popen(argv, cwd=project, env=_environment(argv[0], home),
                                        stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
@@ -723,3 +755,291 @@ def _progress(request, ctx, reader):
             raise Failure("UNSAFE_FILE_KIND")
     status, body = _run_reader(build_argv(receipt["bun"], project, space, intent), project, reader.cancelled)
     return status, {**body, "provider": record["provider"], "disclosure": DISCLOSURE, "generatedAt": _now()}
+
+
+UNBOUND_GUIDANCE = "Bind this conversation first: in this chat, message aidlc-crew (its first call, aidlc_status, binds the conversation) — or run the operator bind procedure from the guide."
+
+
+def _session_json(reader, raw):
+    # Same duplicate-key/depth/node oracle as Reader.document, also for arrays
+    # and already-read binding bytes (the revision must hash the parsed bytes).
+    value = _json(raw)
+    pending = [(value, 0)]
+    while pending:
+        item, depth = pending.pop()
+        reader.nodes += 1
+        if reader.nodes > MAX_JSON_NODES or depth > MAX_JSON_DEPTH:
+            raise Failure("LIMIT_EXCEEDED")
+        if isinstance(item, dict):
+            pending.extend((v, depth + 1) for v in item.values())
+        elif isinstance(item, list):
+            pending.extend((v, depth + 1) for v in item)
+    return value
+
+
+def _optional_binding(reader, path):
+    try:
+        return reader.read(path)
+    except FileNotFoundError:
+        return None
+
+
+def _binding_revision(app, engine):
+    return hashlib.sha256(((app or "") + (engine or "") + "\n").encode("utf-8")).hexdigest()[:16]
+
+
+class _BindingChanged(Exception):
+    def __init__(self, revision):
+        self.revision = revision
+
+
+def _revalidate_session(reader, snapshot):
+    """Binding oracle: exact app/engine bytes at the originally resolved paths.
+
+    Both bounded no-follow reads precede spawn and follow EACH reader return
+    (including failure). Changed/removed bytes => 200 BINDING_CHANGED without
+    selected; unreadable/unsafe bytes => 503. No fallback or disable switch.
+    Sequential reads are not a lock: ABA and changes after the last read are
+    unobservable. The revision describes this pair, not real-time notification.
+    """
+    app_path, engine_path, app, engine = snapshot
+    current_app = _optional_binding(reader, app_path)
+    current_engine = _optional_binding(reader, engine_path)
+    if (app, engine) != (current_app, current_engine):
+        raise _BindingChanged(_binding_revision(current_app, current_engine))
+
+
+def _session_registry_id(reader, project, space, intent):
+    """Intent oracle: aidlc-progress.ts census row-to-directory rule, not a slug guess.
+
+    Read registry + bounded direct directory census before spawning; explicit
+    dirName wins, otherwise slug prefix + lowercase hex suffix + UUID (hyphens
+    removed) endsWith. Duplicate claims/multiple dirs => AMBIGUOUS_INTENT, bad
+    rows => SOURCE_MALFORMED. Reader census later corroborates UUID/slug and
+    eligibility; the join and registry byte digest are checked again after each
+    invocation so registry retargeting cannot reuse the pre-spawn identity.
+    Registry-only is census; absent/orphan/ineligible is refusal.
+    No auto-selection or bypass. Only this intent directory is enumerated;
+    app/engine bindings are always exact reads. No state mutation.
+    """
+    base = Path(project) / "aidlc/spaces" / space / "intents"
+    dirs = []
+    try:
+        with _directory(base) as fd:
+            before = os.fstat(fd)
+            with os.scandir(fd) as entries:
+                for index, entry in enumerate(entries):
+                    reader.checkpoint()
+                    if index >= 2000:
+                        raise Failure("LIMIT_EXCEEDED")
+                    mode = os.stat(entry.name, dir_fd=fd, follow_symlinks=False).st_mode
+                    if stat.S_ISDIR(mode):
+                        dirs.append(entry.name)
+                    elif not stat.S_ISREG(mode):
+                        raise Failure("UNSAFE_FILE_KIND")
+            if not _same(before, os.fstat(fd)):
+                raise Failure("SOURCE_CHANGED")
+    except FileNotFoundError:
+        pass
+    raw = _optional_binding(reader, base / "intents.json")
+    rows = [] if raw is None else _session_json(reader, raw)
+    if not isinstance(rows, list):
+        raise ValueError("registry must be an array")
+    if len(rows) > 500:
+        raise Failure("LIMIT_EXCEEDED")
+    safe = lambda v: isinstance(v, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", v)
+    ids, claimed, targets = set(), set(), []
+    for row in rows:
+        if (not isinstance(row, dict) or not safe(row.get("uuid")) or not safe(row.get("slug")) or
+                not isinstance(row.get("status"), str) or not row["status"].strip() or "\0" in row["status"] or
+                ("dirName" in row and not safe(row["dirName"]))):
+            raise ValueError("invalid registry row")
+        if row["uuid"] in ids:
+            raise Failure("AMBIGUOUS_INTENT")
+        ids.add(row["uuid"])
+
+        def matches(directory):
+            if row.get("dirName"):
+                return row["dirName"] == directory
+            suffix = directory[len(row["slug"]) + 1:]
+            return (directory.startswith(row["slug"] + "-") and
+                    re.fullmatch(r"[0-9a-f]+", suffix) is not None and
+                    row["uuid"].replace("-", "").endswith(suffix))
+
+        found = [d for d in dirs if matches(d)]
+        if len(found) > 1 or (found and found[0] in claimed):
+            raise Failure("AMBIGUOUS_INTENT")
+        claimed.update(found)
+        if matches(intent):
+            targets.append((row["uuid"], row["slug"]))
+    if len(targets) > 1:
+        raise Failure("AMBIGUOUS_INTENT")
+    if not targets:
+        raise Failure("STALE_BINDING")
+    return (*targets[0], hashlib.sha256((raw or "").encode("utf-8")).hexdigest())
+
+
+def _session_payload(state, **fields):
+    return {"schemaVersion": 1, "state": state, "generatedAt": _now(),
+            **fields, "disclosure": DISCLOSURE}
+
+
+def _session_diagnostic(handler):
+    """Correlation oracle: guarded host header and final converted response tuple.
+
+    Runs only inside _guarded's owner-cookie admission, on its worker thread.
+    After conversion, before serialization, attach only the SHA256 first eight
+    as conversationRef for a valid conversation header, including refusals.
+    Missing/malformed and routed-page headers get no body reference; guard
+    refusals never enter here. No extra read or bypass. This guessable, collision-
+    prone correlation aid never selects or authenticates a binding. Raw keys and
+    full hashes are never included in the diagnostic or response metadata.
+    Missing/malformed headers use '-', otherwise only the SHA256 first eight.
+    Presence is response provider.present or '-'; no extra state read or bypass.
+    Registration enables app INFO, but host filters/disabled logging may suppress
+    it. Optional ctx.audit records the same redacted completion independently of
+    verbosity; absent SDK skips that copy, and the SDK's best-effort sink failures
+    do not change the response.
+    """
+    def wrapped(request, ctx, cancelled):
+        status, body = handler(request, ctx, cancelled)
+        key = request.headers.get("X-Session-Key")
+        key_sha256 = hashlib.sha256(key.encode("utf-8")).hexdigest() if (
+            isinstance(key, str) and re.fullmatch(r"dashboard:[A-Za-z0-9._:-]{1,128}", key)) else "-"
+        if key_sha256 != "-" and key != "dashboard:ui":
+            body = {**body, "conversationRef": key_sha256[:8]}
+        ctx.logger.info("aidlc session-progress key=%s state=%s present=%s status=%d",
+                        key_sha256[:8], body["state"], body.get("provider", {}).get("present") or "-", status)
+        audit = getattr(ctx, "audit", None)
+        if audit is not None:
+            audit.record("session-progress", body["state"], resources=(
+                "key=%s state=%s present=%s status=%d" % (
+                    key_sha256[:8], body["state"], body.get("provider", {}).get("present") or "-", status)))
+        return status, body
+    return wrapped
+
+
+@_session_diagnostic
+@_serve
+def _session_progress(request, ctx, reader):
+    try:
+        return _session_progress_read(request, ctx, reader)
+    except _BindingChanged as exc:
+        ctx.logger.warning("aidlc session progress unavailable: BINDING_CHANGED")
+        status, body = _error("BINDING_CHANGED", 200)
+        return status, {**body, "bindingRevision": exc.revision}
+    except OSError as exc:
+        # Redact the requesting identity BEFORE _serve logs string fields: exact
+        # binding filenames contain its full hash. Keep unrelated diagnostics and
+        # errno/lifecycle unchanged; page callers never enter this branch.
+        key = request.headers.get("X-Session-Key")
+        if isinstance(key, str) and key:
+            digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+            for field in ("strerror", "filename"):
+                value = getattr(exc, field, None)
+                if isinstance(value, str):
+                    setattr(exc, field, value.replace(digest, "[session-hash]").replace(key, "[session-key]"))
+        raise
+    except (Failure, ValueError, RecursionError) as exc:
+        # _serve already logs OSError with site/errno/lifecycle. This route also
+        # logs sanitized validation/reader failures before the same converter.
+        ctx.logger.error("aidlc progress site=%s exception=%s code=%s phase=%s",
+                         "_session_progress", type(exc).__name__,
+                         exc.code if isinstance(exc, Failure) else "SOURCE_MALFORMED", "session-read")
+        raise
+
+
+def _session_progress_read(request, ctx, reader):
+    if request.query:
+        raise Failure("INVALID_QUERY", 400, "error")
+    key = request.headers.get("X-Session-Key")
+    if not isinstance(key, str) or not re.fullmatch(r"dashboard:[A-Za-z0-9._:-]{1,128}", key):
+        raise Failure("MISSING_SESSION", 400, "error")
+    if key == "dashboard:ui":
+        raise Failure("NOT_A_CONVERSATION", 409)
+    digest = hashlib.sha256(key.encode("utf-8")).hexdigest()
+    data_dir = Path(ctx.data_dir).resolve(strict=True)
+    app_path = data_dir / "bindings" / (digest + ".json")
+    app_raw = _optional_binding(reader, app_path)
+    if app_raw is None:
+        # Crew's open_slots.json contains keys/ts only, no link marker.
+        # Do not infer linkage from key spelling or read/enumerate transcripts.
+        return 200, _session_payload("unbound", guidance=UNBOUND_GUIDANCE)
+    app = _session_json(reader, app_raw)
+    if not isinstance(app, dict) or not isinstance(app.get("projectDir"), str) or not Path(app["projectDir"]).is_absolute():
+        raise ValueError("invalid app binding")
+    project = Path(app["projectDir"]).resolve(strict=True)
+    with _directory(project):
+        pass
+    if not _stamp_valid(reader, project):
+        raise Failure("INVALID_STAMP", 409)
+    engine_path = project / "aidlc/.aidlc-sessions" / ("crew-" + digest + ".binding.json")
+    engine_raw = _optional_binding(reader, engine_path)
+    space = intent = None
+    if engine_raw is not None:
+        engine = _session_json(reader, engine_raw)
+        if (not isinstance(engine, dict) or not isinstance(engine.get("space"), str) or
+                len(engine["space"]) > MAX_SPACE or not re.fullmatch(r"[a-z][a-z0-9-]*", engine["space"]) or
+                "intent" not in engine or (engine["intent"] is not None and (
+                    not isinstance(engine["intent"], str) or len(engine["intent"]) > MAX_INTENT or
+                    not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", engine["intent"]))) or
+                not isinstance(engine.get("boundAt"), str) or not engine["boundAt"]):
+            raise ValueError("invalid engine binding")
+        _timestamp(engine["boundAt"])
+        if (("backend" in engine and engine["backend"] not in ("kiro", "claude", "unknown", "codex", "blocked")) or
+                ("backendConflict" in engine and type(engine["backendConflict"]) is not bool)):
+            raise ValueError("invalid recorded backend")
+        space, intent = engine["space"], engine["intent"]
+    snapshot = (app_path, engine_path, app_raw, engine_raw)
+    revision = _binding_revision(app_raw, engine_raw)
+    receipt = _receipt(reader, data_dir)
+    record = {"keys": [digest]}
+    joined = _providers(reader, receipt, {"session": record})
+    target = _session_registry_id(reader, project, space, intent) if intent is not None else None
+    with _directory(project / ".kiro-crew/tools") as fd:
+        if not stat.S_ISREG(os.stat("aidlc.ts", dir_fd=fd, follow_symlinks=False).st_mode):
+            raise Failure("UNSAFE_FILE_KIND")
+    _revalidate_session(reader, snapshot)
+    deadline = time.monotonic() + READER_TIMEOUT
+
+    def run(selected=None):
+        try:
+            result = _run_reader(build_argv(receipt["bun"], str(project), space, selected),
+                                 str(project), reader.cancelled, deadline=deadline)
+            if target is not None and _session_registry_id(reader, project, space, intent) != target:
+                raise Failure("SOURCE_CHANGED")
+            return result
+        finally:
+            _revalidate_session(reader, snapshot)
+
+    common = {"project": {"displayName": project.name, "stampValid": True},
+              "bindingRevision": revision, "provider": {**record["provider"], "present": digest in joined}}
+    status, body = run()
+    if status != 200:
+        ctx.logger.error("aidlc progress site=%s code=%s phase=%s", "_session_progress", "READER_FAILURE", "census")
+        return status, _session_payload(body["state"], error=body["error"], **common)
+    census = body["intents"]
+    if len(census) > 500 or any(not isinstance(c, dict) or
+                              not all(isinstance(c.get(k), str) for k in ("space", "id", "displayName")) or
+                              type(c.get("eligible")) is not bool for c in census):
+        raise Failure("READER_MALFORMED", 502)
+    if target is not None:
+        matches = [c for c in census if c.get("space") == space and c.get("id") == target[0]]
+        if len(matches) != 1 or matches[0].get("displayName") != target[1]:
+            raise Failure("SOURCE_CHANGED")
+        candidate = matches[0]
+        if candidate.get("reason") != "registry-only":
+            if candidate.get("eligible") is not True:
+                raise Failure("STALE_BINDING")
+            selected = body.get("selected", {})
+            if selected.get("space") != space or selected.get("id") != target[0]:
+                status, body = run(target[0])
+            if status != 200:
+                ctx.logger.error("aidlc progress site=%s code=%s phase=%s", "_session_progress", "READER_FAILURE", "selected")
+                return status, _session_payload(body["state"], error=body["error"], **common)
+            selected = body.get("selected", {})
+            if body["state"] != "ok" or selected.get("space") != space or selected.get("id") != target[0]:
+                raise Failure("SOURCE_CHANGED")
+            return 200, _session_payload("ok", selected=selected, **common)
+    # Even if the reader auto-selected a singleton, the conversation did not.
+    return 200, _session_payload("census", census=census, **common)

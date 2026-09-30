@@ -76,7 +76,28 @@ export function validateAppKit(
   }
   const parse = (path: string): JsonObject => {
     try {
-      const value: unknown = JSON.parse(files.get(path)?.content ?? "");
+      const source = files.get(path)?.content ?? "";
+      const value: unknown = JSON.parse(source);
+      /** Raw-key guard: JSON.parse is the grammar oracle, then scan whole raw
+       * string tokens before trusting the parsed fields. Read from the collector
+       * snapshot before emission writes; violations make assembly throw, always
+       * on with no bypass. Reject ambiguous app.json keys and sessionApproval at
+       * every JSON site, even in overwritten objects or with escaped spelling.
+       * This is build validation, not runtime authorization or a signature check.
+       */
+      const tokens = source.match(/"(?:\\.|[^"\\])*"|[{}:]/g) ?? [];
+      const fields: Set<string>[] = [];
+      tokens.forEach((token, index) => {
+        if (token === "{") fields.push(new Set());
+        else if (token === "}") fields.pop();
+        else if (token.startsWith('"') && tokens[index + 1] === ":") {
+          const key = JSON.parse(token) as string;
+          const seen = fields.at(-1)!;
+          if (path === "app.json" && seen.has(key)) errors.push(`${path}: duplicate JSON key ${key}`);
+          if (key === "sessionApproval") errors.push(`${path}: forbidden sessionApproval`);
+          seen.add(key);
+        }
+      });
       if (object(value)) return value;
     } catch { /* Malformed inputs become violations. */ }
     errors.push(`${path}: missing or invalid JSON object`);
@@ -194,6 +215,7 @@ export function validateAppKit(
   for (const key of ["version", "minKiroCrewVersion"]) {
     if (typeof app[key] !== "string" || !/^\d+\.\d+\.\d+(?:[-+].+)?$/.test(app[key])) errors.push(`app.json: invalid ${key}`);
   }
+  if (app.minKiroCrewVersion !== "0.7.1") errors.push("app.json: minKiroCrewVersion must be 0.7.1");
   for (const key of ["displayName", "description"]) {
     if (typeof app[key] !== "string" || !app[key].trim()) errors.push(`app.json: missing ${key}`);
   }
@@ -207,6 +229,39 @@ export function validateAppKit(
   const page = Array.isArray(ui.pages) && ui.pages.length === 1 && object(ui.pages[0]) ? ui.pages[0] : {};
   if (page.route !== "/apps/aidlc" || typeof page.label !== "string" || !page.label.trim() || typeof page.icon !== "string" || !page.icon.trim()) {
     errors.push("app.json: expected one /apps/aidlc page with non-empty label and icon");
+  }
+  /** Contribution oracle: Crew's panel schema, narrowed to one read-only tab.
+   * Check the complete snapshot before emission writes; lexical containment plus
+   * emitted-file membership uses the same safePath oracle as ui.entry. Entries
+   * are relative to ui/, never prefixed with ui/ themselves. Labels use JS length
+   * (UTF-16 units, matching the host). Violations make assembly throw before
+   * mutation, always on, no bypass. SDK grants remain client-side only; runtime
+   * owner checks are separate.
+   */
+  const contributes = object(app.contributes) ? app.contributes : {};
+  if (!object(app.contributes) || Object.keys(contributes).join() !== "panelTabs") {
+    errors.push("app.json: contributes must contain only panelTabs");
+  }
+  const tabs = contributes.panelTabs;
+  if (!Array.isArray(tabs) || tabs.length !== 1 || !object(tabs[0])) {
+    errors.push("app.json: contributes.panelTabs must contain exactly one tab object");
+  } else {
+    const tab = tabs[0];
+    const label = "app.json: contributes.panelTabs[0]";
+    for (const key of Object.keys(tab)) {
+      if (!["id", "title", "menuLabel", "menuDescription", "entry", "icon"].includes(key)) errors.push(`${label}: unknown tab field ${key}`);
+    }
+    if (typeof tab.id !== "string" || !/^[a-z][a-z0-9_-]{0,63}$/.test(tab.id) || tab.id !== "progress") {
+      errors.push(`${label}: id must be progress and match ^[a-z][a-z0-9_-]{0,63}$`);
+    }
+    for (const key of ["title", "menuLabel", "menuDescription"]) {
+      const value = tab[key];
+      if (typeof value !== "string" || !value.trim() || value.length > 120) errors.push(`${label}: ${key} must be non-empty and at most 120 UTF-16 units`);
+    }
+    if (typeof tab.entry !== "string" || !safePath(tab.entry) || tab.entry.startsWith("ui/") || !files.has(`ui/${tab.entry}`)) {
+      errors.push(`${label}: entry must resolve to an emitted file under ui/ without a ui/ prefix`);
+    }
+    if ("icon" in tab && (typeof tab.icon !== "string" || !tab.icon.trim())) errors.push(`${label}: icon must be a non-empty Lucide name`);
   }
   const backendHooks = object(app.backend) && object(app.backend.hooks) ? app.backend.hooks : {};
   if (typeof backendHooks.routes !== "string" || !/^backend\.routes:register_routes$/.test(backendHooks.routes) || !files.has("backend/routes.py")) {

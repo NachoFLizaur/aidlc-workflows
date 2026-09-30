@@ -11,9 +11,12 @@ import ctypes
 import errno
 import hashlib
 import importlib.util
+import io
 import json
+import logging
 import os
 from pathlib import Path
+import re
 import shutil
 import signal
 import sys
@@ -28,6 +31,7 @@ ROOT = Path(__file__).resolve().parents[3]
 SUPPORT = ROOT / "tests/harness/kiro-crew"
 SOURCE = ROOT / "harness/kiro-crew/app/backend/routes.py"
 CORPUS = json.loads((ROOT / "tests/fixtures/kiro-crew/progress-payloads.json").read_text())
+PANEL = json.loads((ROOT / "tests/fixtures/kiro-crew/panel-payloads.json").read_text())
 sys.path.insert(0, str(SUPPORT / "fake_kiro_crew"))
 from kiro_crew.apps import manager
 from kiro_crew.dashboard.handlers import source_providers
@@ -182,9 +186,9 @@ class RoutesTest(unittest.TestCase):
         self.assertTrue(process.stdout.closed)
         self.assertTrue(process.stderr.closed)
 
-    def test_only_two_get_routes(self):
+    def test_only_three_get_routes(self):
         self.assertEqual([(r.method, r.path) for r in self.module.register_routes(self.ctx)],
-                         [("GET", "/projects"), ("GET", "/progress")])
+                         [("GET", "/projects"), ("GET", "/progress"), ("GET", "/session-progress")])
 
     def test_guard_allows_owner(self):
         self.assertEqual(self.request("/projects", {})[0], 200)
@@ -595,7 +599,7 @@ class RoutesTest(unittest.TestCase):
         # deadline with a controlled clock, including after both pipes close.
         for pipes_open in (True, False):
             process = Mock()
-            clock = SimpleNamespace(monotonic=Mock(side_effect=[100.0, 109.999, 110.0]), sleep=Mock())
+            clock = SimpleNamespace(monotonic=Mock(side_effect=[100.0, 100.0, 109.999, 110.0]), sleep=Mock())
             with self.subTest(pipes_open=pipes_open), \
                     patch.object(self.module, "time", clock), \
                     patch.object(self.module.subprocess, "Popen", return_value=process) as spawn, \
@@ -610,7 +614,7 @@ class RoutesTest(unittest.TestCase):
                     self.module._run_reader(self.module.build_argv(str(self.bun), str(self.project)),
                                             str(self.project), threading.Event())
                 self.assertEqual((caught.exception.code, caught.exception.status), ("READER_TIMEOUT", 504))
-                self.assertEqual(clock.monotonic.call_count, 3)
+                self.assertEqual(clock.monotonic.call_count, 4)
                 if pipes_open:
                     selector.select.assert_called_once_with(self.module.POLL_INTERVAL)
                     clock.sleep.assert_not_called()
@@ -790,6 +794,679 @@ class RoutesTest(unittest.TestCase):
         manager.ENABLED = True
         with patch.object(self.module, "is_owner_dashboard_request", side_effect=RuntimeError):
             self.assert_code("GUARD_UNAVAILABLE", 503)
+
+
+class SessionRoutesTest(unittest.TestCase):
+    """Exercise the exact-session route through the owner-cookie host boundary."""
+    key_hash = staticmethod(RoutesTest.key_hash)
+    write_json = staticmethod(RoutesTest.write_json)
+    bind = RoutesTest.bind
+    configure = RoutesTest.configure
+
+    def payload(self):
+        body = RoutesTest.payload(self)
+        body = json.loads(json.dumps(body))
+        body["intents"] = [dict(PANEL["intent"])]
+        body["selected"].update({key: PANEL["intent"][key] for key in ("space", "id", "displayName")})
+        return body
+
+    reader_body = payload
+
+    def setUp(self):
+        RoutesTest.setUp(self)
+        self.key = PANEL["sessionKey"]
+        self.bind(self.key)
+        self.recorded = self.project / "aidlc/.aidlc-sessions" / ("crew-" + self.key_hash(self.key) + ".binding.json")
+        self.base = self.project / "aidlc/spaces/non-default/intents"
+        self.base.mkdir(parents=True)
+        self.engine_binding("delivery-selected")
+        self.registry([{"uuid": "record-123", "slug": "delivery", "dirName": "delivery-selected", "status": "active"}],
+                      ["delivery-selected"])
+        self.identity = {"user": "fixture-owner", "app": "", "auth_token": "fixture-validated-cookie",
+                         "is_dashboard_user": True, "auth_from_query_token": False}
+        owner = patch.object(self.module, "is_owner_dashboard_request", side_effect=lambda r:
+                             r.get("user") == "fixture-owner" and r.get("app") == "")
+        owner.start()
+        self.addCleanup(owner.stop)
+        self.write_json(self.home / "session_map.json", {self.key: {"provider": "codex"}})
+
+    def engine_binding(self, intent, key=None, space="non-default"):
+        path = self.project / "aidlc/.aidlc-sessions" / ("crew-" + self.key_hash(key or self.key) + ".binding.json")
+        self.write_json(path, {"space": space, "intent": intent, "boundAt": at(8)})
+
+    def registry(self, rows, directories):
+        for child in self.base.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+        for directory in directories:
+            (self.base / directory).mkdir()
+            (self.base / directory / "aidlc-state.md").write_text("**Scope**: feature\n**Status**: active\n")
+        self.write_json(self.base / "intents.json", rows)
+
+    def request(self, key="default", identity=None, query=None):
+        class Request(dict):
+            pass
+        request = Request(self.identity if identity is None else identity)
+        request.query = {} if query is None else query
+        request.headers = {} if key is None else {"X-Session-Key": self.key if key == "default" else key}
+        request.app = {"state": SimpleNamespace(owner_id="fixture-owner")}
+        route = next(r for r in self.module.register_routes(self.ctx) if r.path == "/session-progress")
+        response = asyncio.run(route.handler(request, self.ctx))
+        self.assertEqual(response.headers["Cache-Control"], "no-store")
+        body = json.loads(response.text)
+        self.assertEqual(body["disclosure"], CORPUS["disclosure"])
+        # Check correlation on every real response, including converted failures.
+        stamped = request.headers.get("X-Session-Key")
+        valid = isinstance(stamped, str) and re.fullmatch(r"dashboard:[A-Za-z0-9._:-]{1,128}", stamped)
+        admitted = body.get("error", {}).get("code") not in ("FORBIDDEN", "GUARD_UNAVAILABLE")
+        if valid and stamped != "dashboard:ui" and admitted:
+            self.assertEqual(body.get("conversationRef"), self.key_hash(stamped)[:8])
+        else:
+            self.assertNotIn("conversationRef", body)
+        self.assertNotRegex(response.text, r"[0-9a-fA-F]{64}")
+        if stamped:
+            self.assertNotIn(stamped, response.text)
+            self.assertNotIn(self.key_hash(stamped), response.text)
+        return response.status, body
+
+    def assert_code(self, code, status, **kwargs):
+        actual, body = self.request(**kwargs)
+        self.assertEqual(actual, status)
+        self.assertEqual(body["error"]["code"], code)
+        self.assertNotIn("selected", body)
+        return body
+
+    def test_session_cookie_owner_success_one_spawn(self):
+        before = snapshot(self.root)
+        with patch.object(self.module, "_run_reader", wraps=self.module._run_reader) as runner:
+            status, body = self.request()
+        self.assertEqual((status, body["state"]), (200, "ok"))
+        self.assertEqual(body["selected"]["id"], "record-123")
+        self.assertEqual(body["project"], {"displayName": self.project.name, "stampValid": True})
+        self.assertEqual(body["provider"]["label"], "codex")
+        self.assertEqual(body["selected"]["backend"]["asRecorded"], "kiro")
+        runner.assert_called_once()
+        self.assertEqual(runner.call_args.args[0][-2:], ["--space", "non-default"])
+        self.assertEqual(before, snapshot(self.root))
+
+    def test_session_provider_own_key_absent(self):
+        self.write_json(self.home / "session_map.json", {"dashboard:other-fixture": {"provider": "codex"}})
+        before = snapshot(self.root)
+        status, body = self.request()
+        self.assertEqual((status, body["state"]), (200, "ok"))
+        self.assertEqual(body["provider"], {"label": "unknown", "source": "crew-session-map",
+                                           "present": False, "conflict": False})
+        self.assertEqual(body["selected"]["backend"]["asRecorded"], "kiro")
+        self.assertEqual(before, snapshot(self.root))
+
+    def test_session_provider_two_keys_no_cross_conflict(self):
+        second = "dashboard:provider-b-fixture"
+        self.bind(second)
+        self.engine_binding("delivery-selected", second)
+        self.write_json(self.home / "session_map.json", {self.key: {"provider": "acp"}, second: {"provider": "codex"}})
+        before = snapshot(self.root)
+        for key, label in ((self.key, "kiro"), (second, "codex")):
+            status, body = self.request(key=key)
+            self.assertEqual((status, body["state"]), (200, "ok"))
+            self.assertEqual(body["provider"], {"label": label, "source": "crew-session-map",
+                                               "present": True, "conflict": False})
+        self.assertEqual(before, snapshot(self.root))
+
+    def test_session_provider_unknown_entry_is_present(self):
+        for entry in ({"provider": "future-provider"}, {"provider": None}, {}, None):
+            with self.subTest(entry=entry):
+                self.write_json(self.home / "session_map.json", {self.key: entry})
+                status, body = self.request()
+                self.assertEqual((status, body["state"]), (200, "ok"))
+                self.assertEqual(body["provider"], {"label": "unknown", "source": "crew-session-map",
+                                                   "present": True, "conflict": False})
+
+    def test_session_default_logger_and_audit_visibility(self):
+        parent = logging.Logger("fixture-root", logging.WARNING)
+        logger = logging.Logger("kirocrew.app.aidlc")
+        logger.parent = parent
+        sibling = logging.Logger("kirocrew.app.other")
+        sibling.parent = parent
+        stream = io.StringIO()
+        handler = logging.StreamHandler(stream)
+        parent.addHandler(handler)
+        self.addCleanup(handler.close)
+        self.ctx.logger, self.ctx.audit = logger, Mock()
+        self.assertEqual(logger.getEffectiveLevel(), logging.WARNING)
+        self.module.register_routes(self.ctx)
+        self.assertEqual(logger.getEffectiveLevel(), logging.INFO)
+        self.assertEqual((parent.level, sibling.getEffectiveLevel()), (logging.WARNING, logging.WARNING))
+        self.assertEqual(logger.handlers, [])
+        self.assertEqual(parent.handlers, [handler])
+        self.assertEqual(handler.level, logging.NOTSET)
+        self.assertTrue(logger.propagate)
+        with patch.object(self.module, "_run_reader", return_value=(200, self.reader_body())):
+            for key, state, present in ((self.key, "ok", True), ("dashboard:log-unbound", "unbound", "-")):
+                stream.seek(0)
+                stream.truncate(0)
+                self.ctx.audit.reset_mock()
+                status, body = self.request(key=key)
+                self.assertEqual((status, body["state"]), (200, state))
+                fields = f"key={self.key_hash(key)[:8]} state={state} present={present} status=200"
+                self.assertEqual(stream.getvalue(), "aidlc session-progress " + fields + "\n")
+                self.ctx.audit.record.assert_called_once_with("session-progress", state, resources=fields)
+                for captured in (stream.getvalue(), repr(self.ctx.audit.mock_calls), json.dumps(body)):
+                    self.assertNotIn(key, captured)
+                    self.assertNotIn(self.key_hash(key), captured)
+        stream.seek(0)
+        stream.truncate(0)
+        handler.setLevel(logging.WARNING)
+        self.ctx.audit.reset_mock()
+        self.request(key="dashboard:log-unbound")
+        self.assertEqual(stream.getvalue(), "")
+        self.ctx.audit.record.assert_called_once()
+        self.ctx.audit.reset_mock()
+        self.assert_code("FORBIDDEN", 403, identity={**self.identity, "auth_from_query_token": True})
+        self.ctx.audit.record.assert_not_called()
+        self.assertNotIn("aidlc session-progress", stream.getvalue())
+        # The host SDK, not the route, owns best-effort sink exception handling.
+        sink = Mock(side_effect=OSError("audit sink unavailable"))
+        def sdk_record(*args, **kwargs):
+            try:
+                sink(*args, **kwargs)
+            except OSError:
+                pass
+        self.ctx.audit = SimpleNamespace(record=sdk_record)
+        self.assertEqual(self.request(key="dashboard:log-unbound")[1]["state"], "unbound")
+        sink.assert_called_once()
+        self.ctx.audit = None
+        self.assertEqual(self.request(key="dashboard:log-unbound")[1]["state"], "unbound")
+        del self.ctx.audit
+        self.assertEqual(self.request(key="dashboard:log-unbound")[1]["state"], "unbound")
+
+    def test_session_diagnostic_two_keys_redacted_and_ordered(self):
+        second = "dashboard:diagnostic-b-fixture"
+        self.bind(second)
+        self.engine_binding(None, second)
+        self.write_json(self.home / "session_map.json", {self.key: {"provider": "acp"}})
+        bodies = []
+        with patch.object(self.module, "_run_reader", return_value=(200, self.reader_body())):
+            for key, state, present in ((self.key, "ok", True), (second, "census", "-")):
+                status, body = self.request(key=key)
+                bodies.append(body)
+                self.assertEqual((status, body["state"]), (200, state))
+                self.assertEqual(self.ctx.logger.info.call_args.args,
+                                 ("aidlc session-progress key=%s state=%s present=%s status=%d",
+                                  self.key_hash(key)[:8], state, present, status))
+        calls = self.ctx.logger.info.call_args_list
+        self.assertEqual(len(calls), 2)
+        prefixes = [call.args[1] for call in calls]
+        self.assertEqual(len(set(prefixes)), 2)
+        for prefix in prefixes:
+            self.assertRegex(prefix, r"^[a-f0-9]{8}$")
+        for key in (self.key, second):
+            for captured in (repr(self.ctx.logger.mock_calls), json.dumps(bodies)):
+                self.assertNotIn(key, captured)
+                self.assertNotIn(self.key_hash(key), captured)
+        for body, key, other in ((bodies[0], self.key, second), (bodies[1], second, self.key)):
+            self.assertEqual(body["conversationRef"], self.key_hash(key)[:8])
+            self.assertNotIn(self.key_hash(other)[:8], json.dumps(body))
+            self.assertNotRegex(json.dumps(body), r"[0-9a-fA-F]{64}")
+
+    def test_session_query_refusal_uses_header_not_query_identity(self):
+        for key in (None, "dashboard:bad/key", "dashboard:a\n", "dashboard:ui", self.key):
+            with self.subTest(key=key):
+                body = self.assert_code("INVALID_QUERY", 400, key=key, query={"session": "dashboard:other-fixture"})
+                self.assertNotIn(self.key_hash("dashboard:other-fixture")[:8], json.dumps(body))
+
+    def test_session_reserved_unsupported_and_reader_error_carry_reference(self):
+        # The wrapper reserves unsupported; the route does not classify linkage.
+        for status, payload in ((200, self.module._session_payload("unsupported", reason=PANEL["reason"])),
+                                (502, self.module._session_payload("error", error={"code": "READER_ERROR", "message": "Failed"}))):
+            with self.subTest(state=payload["state"]):
+                with patch.object(self.module, "_session_progress_read", return_value=(status, payload)):
+                    actual, body = self.request()
+                self.assertEqual((actual, body["state"]), (status, payload["state"]))
+                self.assertEqual(body["conversationRef"], self.key_hash(self.key)[:8])
+
+    def test_session_diagnostic_unbound_and_converted_refusals(self):
+        cases = [("dashboard:unbound-diagnostic", {}, 200, "unbound"),
+                 (self.key, {"session": self.key}, 400, "error"),
+                 (None, {}, 400, "error"), ("dashboard:bad/key", {}, 400, "error"),
+                 ("dashboard:ui", {}, 409, "unavailable")]
+        for key, query, expected_status, expected_state in cases:
+            with self.subTest(key=key):
+                self.ctx.logger.reset_mock()
+                status, body = self.request(key=key, query=query)
+                self.assertEqual((status, body["state"]), (expected_status, expected_state))
+                prefix = self.key_hash(key)[:8] if key and "/" not in key else "-"
+                self.ctx.logger.info.assert_called_once_with(
+                    "aidlc session-progress key=%s state=%s present=%s status=%d",
+                    prefix, expected_state, "-", expected_status)
+                if key:
+                    for captured in (repr(self.ctx.logger.mock_calls), json.dumps(body)):
+                        self.assertNotIn(key, captured)
+                        self.assertNotIn(self.key_hash(key), captured)
+        failures = [(self.module.Failure("READER_TIMEOUT", 504), 504, "unavailable"),
+                    (ValueError(self.key), 503, "unavailable"),
+                    (RecursionError(self.key_hash(self.key)), 503, "unavailable"),
+                    (self.module._BindingChanged(self.key_hash("new binding")[:16]), 200, "unavailable")]
+        for failure, status, state in failures:
+            with self.subTest(failure=type(failure).__name__):
+                self.ctx.logger.reset_mock()
+                with patch.object(self.module, "_session_progress_read", side_effect=failure):
+                    actual, body = self.request()
+                self.assertEqual((actual, body["state"]), (status, state))
+                self.ctx.logger.info.assert_called_once_with(
+                    "aidlc session-progress key=%s state=%s present=%s status=%d",
+                    self.key_hash(self.key)[:8], state, "-", status)
+                self.assertEqual(self.ctx.logger.mock_calls[-1][0], "info")
+                for captured in (repr(self.ctx.logger.mock_calls), json.dumps(body)):
+                    self.assertNotIn(self.key, captured)
+                    self.assertNotIn(self.key_hash(self.key), captured)
+
+    def test_session_diagnostic_oserror_identity_redaction(self):
+        digest = self.key_hash(self.key)
+        for number, code in ((errno.EPERM, "SOURCE_UNREADABLE"), (errno.ELOOP, "UNSAFE_FILE_KIND")):
+            self.ctx.logger.reset_mock()
+            failure = OSError(number, "cannot read " + self.key, str(self.bindings / (digest + ".json")))
+            failure.reader_lifecycle = {"pid": 123, "pgid": 123, "phase": "read"}
+            with patch.object(self.module, "_session_progress_read", side_effect=failure):
+                body = self.assert_code(code, 503)
+            self.ctx.logger.error.assert_called_once()
+            self.assertEqual(self.ctx.logger.error.call_args.args[1:4],
+                             ("_session_progress", type(failure).__name__, number))
+            self.assertEqual(self.ctx.logger.error.call_args.args[-3:], (123, 123, "read"))
+            self.ctx.logger.info.assert_called_once_with(
+                "aidlc session-progress key=%s state=%s present=%s status=%d",
+                digest[:8], "unavailable", "-", 503)
+            self.assertEqual(self.ctx.logger.mock_calls[-1][0], "info")
+            for captured in (repr(self.ctx.logger.mock_calls), json.dumps(body)):
+                self.assertNotIn(self.key, captured)
+                self.assertNotIn(digest, captured)
+
+    def test_session_no_diagnostic_before_guard(self):
+        identities = [{**self.identity, "auth_from_query_token": True},
+                      {**self.identity, "user": "not-owner"},
+                      {**self.identity, "app": "aidlc"},
+                      {k: v for k, v in self.identity.items() if k != "is_dashboard_user"}]
+        self.ctx.audit = Mock()
+        with patch.object(self.module, "_session_progress_read", side_effect=AssertionError("handler reached")):
+            for identity in identities:
+                self.assert_code("FORBIDDEN", 403, identity=identity)
+            with patch.object(self.module, "_GUARD_AVAILABLE", False):
+                self.assert_code("GUARD_UNAVAILABLE", 503)
+            with patch.object(manager, "ENABLED", False):
+                self.assert_code("FORBIDDEN", 403)
+            with patch.object(self.module, "is_owner_dashboard_request", side_effect=RuntimeError):
+                self.assert_code("GUARD_UNAVAILABLE", 503)
+        self.ctx.audit.record.assert_not_called()
+        self.ctx.logger.info.assert_not_called()
+        self.assertNotIn("aidlc session-progress", repr(self.ctx.logger.mock_calls))
+        self.assertNotIn(self.key, repr(self.ctx.logger.mock_calls))
+        self.assertNotIn(self.key_hash(self.key), repr(self.ctx.logger.mock_calls))
+
+    def test_session_query_token_owner_denied_before_reads(self):
+        with patch.object(self.module.Reader, "read", side_effect=AssertionError("read reached")):
+            self.assert_code("FORBIDDEN", 403, identity={**self.identity, "auth_from_query_token": True})
+        self.ctx.logger.warning.assert_called_once()
+
+    def test_session_missing_dashboard_provenance_denied(self):
+        identity = dict(self.identity)
+        del identity["is_dashboard_user"]
+        self.assert_code("FORBIDDEN", 403, identity=identity)
+        self.ctx.logger.warning.assert_called_once()
+
+    def test_session_all_missing_none_and_nonliteral_provenance_denied(self):
+        with patch.object(self.module.Reader, "read", side_effect=AssertionError("read reached")):
+            for key in self.identity:
+                for remove in (True, False):
+                    identity = dict(self.identity)
+                    if remove:
+                        del identity[key]
+                    else:
+                        identity[key] = None
+                    with self.subTest(key=key, remove=remove):
+                        self.assert_code("FORBIDDEN", 403, identity=identity)
+            for key, value in (("is_dashboard_user", 1), ("auth_from_query_token", 0),
+                               ("is_dashboard_user", "true"), ("auth_from_query_token", "false")):
+                self.assert_code("FORBIDDEN", 403, identity={**self.identity, key: value})
+
+    def test_session_app_token_identity_denied(self):
+        self.assert_code("FORBIDDEN", 403, identity={**self.identity, "app": "aidlc", "is_dashboard_user": False})
+        self.assert_code("FORBIDDEN", 403, identity={**self.identity, "app": "aidlc"})
+
+    def test_session_guard_import_disabled_and_predicate_failure(self):
+        original = builtins.__import__
+        for missing in ("kiro_crew.dashboard.handlers.source_providers", "kiro_crew.apps.manager", "kiro_crew.apps.route_registry"):
+            def importer(name, *args, **kwargs):
+                if name == missing:
+                    raise ImportError("host import failure")
+                return original(name, *args, **kwargs)
+            with patch("builtins.__import__", side_effect=importer):
+                unavailable = load_module()
+            with patch.object(self, "module", unavailable):
+                self.assert_code("GUARD_UNAVAILABLE", 503)
+        with patch.object(manager, "ENABLED", False):
+            self.assert_code("FORBIDDEN", 403)
+        with patch.object(self.module, "is_owner_dashboard_request", side_effect=RuntimeError):
+            self.assert_code("GUARD_UNAVAILABLE", 503)
+
+    def test_session_missing_header(self):
+        self.assert_code("MISSING_SESSION", 400, key=None)
+
+    def test_session_invalid_header_and_accepted_grammar(self):
+        for key in ("", "dashboard:", "dashboard:a/b", "dashboard:a\n", "dashboard:" + "a" * 129,
+                    "other:slot", " dashboard:chat", "dashboard:chat ", "dashboard:é"):
+            with self.subTest(key=key):
+                self.assert_code("MISSING_SESSION", 400, key=key)
+        for key in ("dashboard:a", "dashboard:chat-example", "dashboard:second-example", "dashboard:A._:-", "dashboard:" + "a" * 128):
+            self.assertEqual(self.request(key=key)[1]["state"], "unbound")
+
+    def test_session_routed_page_is_not_conversation(self):
+        self.assert_code("NOT_A_CONVERSATION", 409, key="dashboard:ui")
+
+    def test_session_forged_unbound_has_no_key_or_hash_and_no_enumeration(self):
+        key = "dashboard:forged-fixture"
+        before = snapshot(self.root)
+        with patch.object(self.module.os, "scandir", side_effect=AssertionError("enumeration reached")), \
+                patch.object(self.module, "_receipt", side_effect=AssertionError("receipt reached")), \
+                patch.object(self.module, "_providers", side_effect=AssertionError("provider reached")), \
+                patch.object(self.module, "_run_reader", side_effect=AssertionError("spawn reached")):
+            status, body = self.request(key=key)
+        self.assertEqual((status, body["state"]), (200, "unbound"))
+        self.assertEqual(body["guidance"], self.module.UNBOUND_GUIDANCE)
+        self.assertNotIn(key, json.dumps(body))
+        self.assertNotIn(self.key_hash(key), json.dumps(body))
+        self.assertNotIn("bindingRevision", body)
+        self.assertEqual(before, snapshot(self.root))
+
+    def test_session_two_conversations_same_project_different_intents(self):
+        rows = [{"uuid": "record-123", "slug": "delivery", "dirName": "delivery-selected", "status": "active"},
+                {"uuid": "record-456", "slug": "design", "dirName": "design-selected", "status": "active"}]
+        self.registry(rows, [r["dirName"] for r in rows])
+        second = "dashboard:second-fixture"
+        self.bind(second)
+        self.engine_binding("design-selected", second)
+        self.write_json(self.home / "session_map.json", {self.key: {"provider": "codex"}, second: {"provider": "acp"}})
+        calls = []
+        def run(argv, project, cancelled, **kwargs):
+            calls.append((argv, kwargs["deadline"]))
+            body = self.reader_body()
+            body["intents"] = [{"space": "non-default", "id": r["uuid"], "displayName": r["slug"], "eligible": True} for r in rows]
+            if "--intent" not in argv:
+                body["state"] = "selection-required"
+                del body["selected"]
+            else:
+                row = next(r for r in rows if r["uuid"] == argv[-1])
+                body["selected"].update(id=row["uuid"], displayName=row["slug"])
+            return 200, body
+        with patch.object(self.module, "_run_reader", side_effect=run), patch.object(self.module.time, "monotonic", return_value=100):
+            for key, identifier, provider in ((self.key, "record-123", "codex"), (second, "record-456", "kiro")):
+                status, body = self.request(key=key)
+                self.assertEqual((status, body["selected"]["id"], body["provider"]["label"]), (200, identifier, provider))
+        self.assertEqual(len(calls), 4)
+        for first, second_call in (calls[:2], calls[2:]):
+            self.assertEqual(first[1], 110)
+            self.assertEqual(first[1], second_call[1])
+            self.assertNotIn("--intent", first[0])
+            self.assertEqual(second_call[0][-2], "--intent")
+
+    def test_session_null_intent_singleton_is_census(self):
+        self.engine_binding(None)
+        (self.project / "aidlc/active-space").write_text("non-default")
+        (self.base / "active-intent").write_text("delivery-selected")
+        with patch.object(self.module, "_run_reader", wraps=self.module._run_reader) as runner:
+            status, body = self.request()
+        self.assertEqual((status, body["state"]), (200, "census"))
+        self.assertEqual(len(body["census"]), 1)
+        self.assertNotIn("selected", body)
+        runner.assert_called_once()
+
+    def test_session_missing_engine_binding_is_project_census(self):
+        self.recorded.unlink()
+        with patch.object(self.module, "_run_reader", wraps=self.module._run_reader) as runner:
+            status, body = self.request()
+        self.assertEqual((status, body["state"]), (200, "census"))
+        self.assertNotIn("selected", body)
+        self.assertNotIn("--space", runner.call_args.args[0])
+        self.assertRegex(body["bindingRevision"], r"^[a-f0-9]{16}$")
+
+    def test_session_malformed_engine_binding_logs_without_private_detail(self):
+        for raw in ("{private-broken", "[]", '{"space":"../private","intent":null,"boundAt":"x"}'):
+            self.ctx.logger.reset_mock()
+            self.recorded.write_text(raw)
+            body = self.assert_code("SOURCE_MALFORMED", 503)
+            self.ctx.logger.error.assert_called_once()
+            self.assertIn("_session_progress", self.ctx.logger.error.call_args.args)
+            self.assertNotIn("private", json.dumps(body))
+            self.assertNotIn("private", str(self.ctx.logger.error.call_args))
+
+    def test_session_converter_oserror_diagnostics_before_response(self):
+        denied = PermissionError(errno.EPERM, "private detail", "private filename")
+        with patch.object(self.module, "_session_progress_read", side_effect=denied):
+            body = self.assert_code("SOURCE_UNREADABLE", 503)
+        self.ctx.logger.error.assert_called_once()
+        self.assertEqual(self.ctx.logger.error.call_args.args[1:],
+                         ("_session_progress", "PermissionError", errno.EPERM, "private detail", "private filename", None, None, "source"))
+        self.assertNotIn("private", json.dumps(body))
+
+    def parity_case(self, name):
+        case = next(c for c in PANEL["identities"] if c["name"] == name)
+        self.registry(case["rows"], case["directories"])
+        self.engine_binding(case["intent"])
+        body = self.reader_body()
+        body["intents"] = case["census"]
+        if case["state"] == "ok":
+            body["selected"].update(id=case["id"], displayName=case["census"][0]["displayName"])
+        else:
+            body["state"] = "empty"
+            del body["selected"]
+        with patch.object(self.module, "_run_reader", return_value=(200, body)):
+            status, actual = self.request()
+        self.assertEqual((status, actual["state"]), (case["http"], case["state"]))
+        if "code" in case:
+            self.assertEqual(actual["error"]["code"], case["code"])
+        elif case["state"] == "ok":
+            self.assertEqual(actual["selected"]["id"], case["id"])
+        else:
+            self.assertNotIn("selected", actual)
+
+    def test_session_parity_dirname_present(self):
+        self.parity_case("dirName-present")
+
+    def test_session_parity_slug_hex_suffix(self):
+        self.parity_case("slug-hex-suffix")
+
+    def test_session_parity_ambiguous(self):
+        self.parity_case("ambiguous")
+        row = {"uuid": "record-123", "slug": "delivery", "dirName": "delivery-selected", "status": "active"}
+        self.registry([row, row], ["delivery-selected"])
+        self.assert_code("AMBIGUOUS_INTENT", 503)
+
+    def test_session_parity_registry_only_census(self):
+        self.parity_case("registry-only")
+
+    def test_session_multiple_directories_for_one_row_refused(self):
+        self.registry([{"uuid": "00000000-0000-0000-0000-000000001111", "slug": "shared", "status": "active"}],
+                      ["shared-1111", "shared-00001111"])
+        self.engine_binding("shared-1111")
+        self.assert_code("AMBIGUOUS_INTENT", 503)
+
+    def test_session_registry_changes_during_reader_refused(self):
+        original = (self.base / "intents.json").read_text()
+        for changed in (original.replace("delivery\"", "changed-slug\""), original + " "):
+            (self.base / "intents.json").write_text(original)
+            def change_registry(*args, **kwargs):
+                (self.base / "intents.json").write_text(changed)
+                return 200, self.reader_body()
+            with patch.object(self.module, "_run_reader", side_effect=change_registry):
+                self.assert_code("SOURCE_CHANGED", 503)
+
+    def test_session_invalid_engine_timestamp_and_backend_refused(self):
+        original = json.loads(self.recorded.read_text())
+        for extra in ({"boundAt": "not-a-timestamp"}, {"backend": "invalid"}, {"backendConflict": 1},
+                      {"space": "a" * 129}, {"space": "Main"}, {"intent": "a" * 257}, {"intent": []},
+                      {"intent": "../escape"}, {"boundAt": ""}):
+            self.write_json(self.recorded, {**original, **extra})
+            with self.subTest(extra=extra):
+                self.assert_code("SOURCE_MALFORMED", 503)
+        self.write_json(self.recorded, {k: v for k, v in original.items() if k != "intent"})
+        self.assert_code("SOURCE_MALFORMED", 503)
+
+    def test_session_malformed_census_is_reader_failure(self):
+        body = self.reader_body()
+        for census in ([None], [{**PANEL["intent"], "eligible": 1}], [PANEL["intent"]] * 501):
+            with patch.object(self.module, "_run_reader", return_value=(200, {**body, "intents": census})):
+                self.assert_code("READER_MALFORMED", 502)
+        self.engine_binding(None)
+        with patch.object(self.module, "_run_reader", return_value=(200, {**body, "intents": [PANEL["intent"]] * 500})):
+            self.assertEqual(len(self.request()[1]["census"]), 500)
+
+    def test_session_stale_or_orphan_binding_no_fallback(self):
+        self.engine_binding("unknown-record")
+        self.assert_code("STALE_BINDING", 503)
+        self.engine_binding("delivery-selected")
+        body = self.reader_body()
+        for patch_row, code in (({"eligible": False, "reason": "completed"}, "STALE_BINDING"),
+                                ({"displayName": "wrong-slug"}, "SOURCE_CHANGED"), ({"id": "other"}, "SOURCE_CHANGED")):
+            body["intents"] = [{**PANEL["intent"], **patch_row}]
+            with patch.object(self.module, "_run_reader", return_value=(200, body)):
+                self.assert_code(code, 503)
+        body = self.reader_body()
+        body["selected"]["id"] = "wrong-selected"
+        with patch.object(self.module, "_run_reader", return_value=(200, body)) as runner:
+            self.assert_code("SOURCE_CHANGED", 503)
+        self.assertEqual(runner.call_count, 2)
+
+    def test_session_invalid_stamp_and_stale_project_no_spawn(self):
+        with patch.object(self.module, "_run_reader", side_effect=AssertionError("spawn reached")):
+            self.stamp.unlink()
+            self.assert_code("INVALID_STAMP", 409)
+            self.bind(self.key, self.root / "missing-project")
+            self.assert_code("SOURCE_UNREADABLE", 503)
+
+    def test_session_engine_rebind_mid_reader_and_next_call_recovers(self):
+        original = self.module._run_reader
+        def rebind(*args, **kwargs):
+            result = original(*args, **kwargs)
+            self.engine_binding(None)
+            return result
+        with patch.object(self.module, "_run_reader", side_effect=rebind):
+            body = self.assert_code("BINDING_CHANGED", 200)
+        status, recovered = self.request()
+        self.assertEqual((status, recovered["state"]), (200, "census"))
+        self.assertEqual(body["bindingRevision"], recovered["bindingRevision"])
+        self.assertNotIn("selected", recovered)
+        # A first census can require a second reader; revalidate that return too.
+        self.engine_binding("delivery-selected")
+        calls = []
+        def rebind_selected(argv, *args, **kwargs):
+            calls.append(kwargs["deadline"])
+            body = self.reader_body()
+            if "--intent" not in argv:
+                body["state"] = "selection-required"
+                del body["selected"]
+            else:
+                self.engine_binding(None)
+            return 200, body
+        with patch.object(self.module, "_run_reader", side_effect=rebind_selected):
+            self.assert_code("BINDING_CHANGED", 200)
+        self.assertEqual(len(calls), 2)
+        self.assertEqual(calls[0], calls[1])
+        self.assertEqual(self.request()[1]["state"], "census")
+
+    def test_session_app_rebind_mid_reader_and_next_call_recovers(self):
+        other = self.root / "other-project"
+        shutil.copytree(self.project, other)
+        def rebind(*args, **kwargs):
+            self.bind(self.key, other)
+            return 200, self.reader_body()
+        with patch.object(self.module, "_run_reader", side_effect=rebind):
+            self.assert_code("BINDING_CHANGED", 200)
+        status, body = self.request()
+        self.assertEqual((status, body["state"], body["project"]["displayName"]), (200, "ok", "other-project"))
+
+    def test_session_rebind_removal_and_reader_failure_discard_selected(self):
+        def rebind(*args, **kwargs):
+            self.recorded.unlink()
+            raise self.module.Failure("READER_TIMEOUT", 504)
+        with patch.object(self.module, "_run_reader", side_effect=rebind):
+            self.assert_code("BINDING_CHANGED", 200)
+        self.assertEqual(self.request()[1]["state"], "census")
+        self.engine_binding("delivery-selected")
+        app = self.bindings / (self.key_hash(self.key) + ".json")
+        def remove_app(*args, **kwargs):
+            app.unlink()
+            return 200, self.reader_body()
+        with patch.object(self.module, "_run_reader", side_effect=remove_app):
+            self.assert_code("BINDING_CHANGED", 200)
+        self.assertEqual(self.request()[1]["state"], "unbound")
+
+    def test_session_revision_is_hash_of_exact_pair_and_newline(self):
+        app_path = self.bindings / (self.key_hash(self.key) + ".json")
+        for suffix in (b"", b" \n"):
+            app_path.write_bytes(app_path.read_bytes() + suffix)
+            app, engine = app_path.read_bytes(), self.recorded.read_bytes()
+            expected = hashlib.sha256(app + engine + b"\n").hexdigest()[:16]
+            self.assertEqual(self.request()[1]["bindingRevision"], expected)
+
+    def test_session_keys_only_cannot_classify_linked_slot(self):
+        self.write_json(self.home / "open_slots.json", {"keys": ["linked-fixture"], "ts": 1})
+        before = snapshot(self.root)
+        status, body = self.request(key="dashboard:linked-fixture")
+        self.assertEqual((status, body["state"]), (200, "unbound"))
+        self.assertNotIn("reason", body)
+        self.assertEqual(before, snapshot(self.root))
+
+    def test_session_any_query_parameter_refused_before_reads(self):
+        class Multi(dict):
+            def getall(self, key):
+                return [self[key], self[key]]
+        with patch.object(self.module.Reader, "read", side_effect=AssertionError("read reached")):
+            for query in ({"session": self.key}, {"unknown": ""}, {"token": "fixture"},
+                          {"project": "selected"}, {"space": "non-default", "intent": "record-123"}, Multi(session=self.key)):
+                self.assert_code("INVALID_QUERY", 400, query=query)
+
+    def test_session_binding_no_follow_and_byte_bound(self):
+        app = self.bindings / (self.key_hash(self.key) + ".json")
+        for path in (app, self.recorded):
+            original = path.read_bytes()
+            path.write_bytes(original.ljust(self.module.MAX_FILE_BYTES))
+            self.assertEqual(self.request()[0], 200)
+            path.write_bytes(original.ljust(self.module.MAX_FILE_BYTES + 1))
+            self.assert_code("LIMIT_EXCEEDED", 503)
+            path.unlink()
+            backup = self.root / (path.name + ".backup")
+            backup.write_bytes(original)
+            path.symlink_to(backup)
+            self.assert_code("UNSAFE_FILE_KIND", 503)
+            path.unlink()
+            os.mkfifo(path)
+            self.assert_code("UNSAFE_FILE_KIND", 503)
+            path.unlink()
+            path.write_bytes(original)
+            def unsafe_reread(*args, **kwargs):
+                path.unlink()
+                path.symlink_to(backup)
+                return 200, self.reader_body()
+            with patch.object(self.module, "_run_reader", side_effect=unsafe_reread):
+                self.assert_code("UNSAFE_FILE_KIND", 503)
+            path.unlink()
+            path.write_bytes(original)
+        original = app.read_bytes()
+        for value in ([], {"projectDir": "relative"}, {"projectDir": None}):
+            self.write_json(app, value)
+            self.assert_code("SOURCE_MALFORMED", 503)
+        app.write_bytes(original)
+        # The directory bound includes the registry itself: 1 + 1999 is admitted.
+        for index in range(1998):
+            (self.base / f"extra-{index}").mkdir()
+        self.assertEqual(self.request()[0], 200)
+        (self.base / "overflow").mkdir()
+        self.assert_code("LIMIT_EXCEEDED", 503)
+        (self.base / "overflow").rmdir()
+        rows = json.loads((self.base / "intents.json").read_text())
+        rows.extend({"uuid": f"extra-{i}", "slug": f"extra-{i}", "status": "active"} for i in range(499))
+        self.write_json(self.base / "intents.json", rows)
+        self.assertEqual(self.request()[0], 200)
+        self.write_json(self.base / "intents.json", rows + [{"uuid": "overflow", "slug": "overflow", "status": "active"}])
+        self.assert_code("LIMIT_EXCEEDED", 503)
 
 
 if __name__ == "__main__":

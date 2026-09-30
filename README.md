@@ -92,7 +92,7 @@ guide in the table below. The complete walkthrough is in
 | Cursor | `aidlc config --harness cursor` | Open Cursor or run `agent` | `/aidlc` | [Cursor](docs/guide/harnesses/cursor.md) |
 | opencode >= 1.17 | `aidlc config --harness opencode` | `opencode` | `/aidlc` | [opencode](docs/guide/harnesses/opencode.md) |
 | GitHub Copilot CLI >= 1.0.74 / VS Code >= 1.130 | `aidlc config --harness copilot` | Copilot CLI or VS Code | `/aidlc` | [GitHub Copilot](docs/guide/harnesses/copilot.md) |
-| Kiro Crew >= 0.6.0 | `aidlc config --harness kiro-crew` plus App Kit setup | Dashboard with project selected | Plain-text `aidlc` to **aidlc-crew** | [Kiro Crew](docs/guide/harnesses/kiro-crew.md#install-and-verify) |
+| Kiro Crew >= 0.7.1 | `aidlc config --harness kiro-crew` plus App Kit setup | Dashboard with project selected | Plain-text `aidlc` to **aidlc-crew** | [Kiro Crew](docs/guide/harnesses/kiro-crew.md#install-and-verify) |
 
 Model-provider setup belongs to the harness. Shipped project configuration
 keeps the provider and model already selected by the user. `aidlc config

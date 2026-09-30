@@ -76,7 +76,7 @@ and the authorization-check-to-audit race remain limits: detection, not preventi
 
 ## Kiro Crew progress routes
 
-The App Kit registers two GET routes beneath `/api/apps/aidlc`; the [progress page](../guide/harnesses/kiro-crew.md#progress-page) uses them through Crew's SDK.
+The App Kit registers three GET routes beneath `/api/apps/aidlc`; the [progress page](../guide/harnesses/kiro-crew.md#progress-page) uses `/projects` and `/progress`, and the [conversation panel](../guide/harnesses/kiro-crew.md#in-a-conversation) uses `/session-progress`, through Crew's SDK.
 Every request checks the live app-enabled state, then `is_owner_dashboard_request`, before project reads or child execution. Missing imports or predicate failure refuses; there is no bypass.
 Responses carry `schemaVersion: 1`, `Cache-Control: no-store`, and this disclosure:
 
@@ -86,6 +86,7 @@ Responses carry `schemaVersion: 1`, `Cache-Control: no-store`, and this disclosu
 | --- | --- |
 | `/projects` | No query parameters. Returns `projects` and counted `warnings` (`CORRUPT_BINDINGS` for ignored records). Canonical project paths are deduplicated and ordered by latest binding. Entries expose an opaque `id`, `displayName`, `boundAt`, `stampValid`, and `providerLabel`, not raw session keys. An empty list is valid. |
 | `/progress` | Required `project` is a returned 16-lowercase-hex id. Optional `space` (≤128 characters, `[A-Za-z0-9][A-Za-z0-9._-]*`) and `intent` (≤256, `[A-Za-z0-9][A-Za-z0-9_.:-]*`); intent requires space. Duplicate/extra parameters refuse. Rebuilds the project census and checks the stamp before spawning the selected project engine. |
+| `/session-progress` | No query parameters. Uses only the SDK's unchanged `X-Session-Key` header and exact conversation bindings; see [Conversation progress](#conversation-progress). |
 
 Progress returns `generatedAt`, `provider` (label/source/conflict), and the reader envelope. HTTP 200 states are `ok`, `empty`, or `selection-required`; only `ok` has `selected`. The census covers all spaces; explicit selection matches intent id before a unique slug. One eligible record auto-selects, none is empty, several require selection. Ineligible records stay visible.
 The reader also has `unavailable`/`error` states with `error.code/message`; CLI failures become minimal `error` envelopes. Never render them as zero progress. Selected data includes phases/stages, completed/total/skipped counts, gate ages when derivable, separate selected/unattributed blockers, recorded backend labels, and project-wide ledger counts. Provider/recorded labels never authorize execution.
@@ -98,12 +99,42 @@ The reader also has `unavailable`/`error` states with `error.code/message`; CLI 
 | 502 | `READER_START_FAILED`, `READER_OUTPUT_OVERFLOW`, `READER_MALFORMED`, or a valid reader failure envelope with its original code, such as `INVALID_SELECTION` or `MALFORMED_PLAN` |
 | 504 | `READER_TIMEOUT` |
 
-The shim accepts at most 1,000 binding-directory entries, 64 KiB per ordinary file, a 4 MiB/10,000-entry provider map, 16 MiB aggregate input, and 100,000 decoded JSON nodes at depth ≤64. It refuses symlinks/special files and changed snapshots rather than returning partial success; invalid individual bindings alone are counted and skipped.
+The shim accepts at most 1,000 binding-directory entries, 64 KiB per ordinary file, a 4 MiB/10,000-entry provider map, 16 MiB aggregate input, and 100,000 decoded JSON nodes at depth ≤64. It refuses symlinks/special files and changed snapshots rather than returning partial success; project enumeration counts and skips invalid individual bindings, while exact-session reads refuse them.
 The reader separately caps files at 1 MiB, aggregate input at 16 MiB, directory entries at 2,000 each/10,000 overall, intents/scopes at 500 each, stages at 200 per graph/state/grid entry, bindings and ledger entries at 1,000 each, and audit blocks at 10,000. These limits cannot be disabled.
 The receipt's absolute Bun launches `<project>/.kiro-crew/tools/aidlc.ts engine progress --json --project-dir <project>` with optional `--space`/`--intent` pairs. No PATH fallback or shell is used. The project is cwd; the child gets a scrubbed environment, disposable HOME, and disabled Bun transpiler cache.
 Reader execution has a 10-second deadline, 1 MiB stdout and 64 KiB stderr caps; cleanup sends TERM, allows one second, then KILL, waits and closes pipes. Cancellation joins the worker before propagating; regular-file reads are off-loop, not covered by a remote-filesystem deadline.
 This hidden CLI route (`top-progress`, `pinPolicy: "read-only"`) bypasses startup/recovery and version redispatch. It requires `--json`, rejects duplicate/unknown flags, defaults project to cwd rather than host environment, and requires an absolute explicit project. A mismatched version pin warns on stderr only; stdout is one JSON document and exit is 0/1. Unlike the gateway, the standalone reader permits an absent stamp.
 Observation reads project records but performs no workflow mutations or repairs. Trust still covers the unsandboxed gateway and local executable; disposable HOME, host logs, and Python caches may be written. Setup/doctor cache verification discovers CPython 3.12 through absolute `KIROCREW_PYTHON` first (invalid means refusal), then the resolved Crew launcher's `python3.12` sibling, then the Kiro Crew app's bundled Python at its standard macOS location. There is no runtime PATH Python lookup. Normal installs need no extra interpreter setup; otherwise set `KIROCREW_PYTHON` as described in the guide. This does not select the route's Bun executable.
+
+### Conversation progress
+
+`GET /api/apps/aidlc/session-progress` requires validated owner-cookie provenance on every request, before header/binding/provider reads or reader execution. After the live enabled check, all five middleware fields (`user`, `app`, `auth_token`, `is_dashboard_user`, `auth_from_query_token`) must be non-None; `is_dashboard_user` must be literal `True`, `auth_from_query_token` literal `False`, and the owner predicate must pass. Missing/nonliteral provenance, query-token or app-token access, disabled app, or non-owner returns 403 `FORBIDDEN`; unavailable imports or a failing predicate returns 503 `GUARD_UNAVAILABLE`. There is no bypass.
+The SDK's `X-Session-Key` is host-UI attribution, not server attestation. The header must fullmatch `dashboard:[A-Za-z0-9._:-]{1,128}` unchanged: missing/malformed is 400 `MISSING_SESSION`, and exact `dashboard:ui` is 409 `NOT_A_CONVERSATION`. Any query returns 400 `INVALID_QUERY` before filesystem access, including identity/selection overrides; query validation precedes header validation. No body-based identity is read.
+
+Binding selection uses only the exact app binding and engine binding for that key, never another conversation or active cursors. Missing app binding returns `unbound` before provider/engine reads. Bound projects require a valid stamp before spawn. Corrupt, unsafe, stale, or ambiguous bindings refuse rather than fall back. Intent resolution corroborates the registry/directory join against the reader census; it never substitutes a singleton intent.
+
+| State | Result |
+| --- | --- |
+| `ok` (200) | `project` (`displayName`, `stampValid: true`), `bindingRevision`, exact-session `provider`, and `selected` with the page's progress fields |
+| `census` (200) | Same bound metadata plus read-only `census`, grouped by space in the panel; absent engine binding, null intent, or registry-only target; no `selected` |
+| `unbound` (200) | Binding `guidance`; no selected progress or bound metadata |
+| `unavailable` / `error` | `error.code/message`, never selected progress; bound metadata may accompany reader failures |
+| `unsupported` (reserved) | `reason`; accepted by the panel but not emitted by the current route, which does not infer linked/channel-slot identity |
+
+Envelopes carry `schemaVersion: 1`, `generatedAt`, the observe-only disclosure, and `Cache-Control: no-store`. Provider `present` distinguishes no exact-session map entry from an unknown-valued entry; neither supplies a current known provider, nor does another conversation create a conflict. Recorded labels do not authorize execution.
+`bindingRevision` is the first 16 lowercase hex characters of SHA-256 over UTF-8 `(appRaw or "") + (engineRaw or "") + "\n"`. It describes the exact binding bytes, not a live identity or timestamp; it is present on `ok`/`census`, bound reader failure envelopes, and `BINDING_CHANGED`, not every refusal or `unbound`.
+Bindings are reread before execution and after each reader return, including failure. Changed/removed bytes produce HTTP 200 `unavailable` with `BINDING_CHANGED` and the new revision, without selected data. Unsafe/unreadable rereads refuse. The next poll starts fresh; sequential reads cannot detect change-and-revert or changes after the last read. The panel discards old progress on any refusal or changed revision.
+The session join caps directory entries at 2,000 and registry/census rows at 500; shared file/JSON/output budgets still apply. Up to two reader calls share one 10-second deadline. Registry retargeting refuses `SOURCE_CHANGED`; absent/orphan/ineligible targets use `STALE_BINDING`, ambiguous claims use `AMBIGUOUS_INTENT` (both 503). `INVALID_STAMP` is 409; shared 502/503/504 reader/source codes above also apply.
+
+`conversationRef` is SHA-256 of the unchanged UTF-8 header, truncated to eight lowercase hex characters. It is a guessable, collision-prone correlation aid, never authentication or a binding selector; raw keys and full identity hashes are not returned.
+
+| Response path | `conversationRef` |
+| --- | --- |
+| Guard refusal, missing/malformed header, or `dashboard:ui` | Absent, even when query validation also fails |
+| Admitted valid conversation header | Present on success and converted refusals, including `INVALID_QUERY`, reader failures, and `BINDING_CHANGED` |
+
+The panel displays the reference only from the settled response, not during loading/refresh; SDK/network failures and invalid success envelopes do not retain an old reference.
+After admission and response conversion, before serialization, each completed request emits one INFO diagnostic line and, when available, `ctx.audit.record("session-progress", state, resources=...)`. Metadata contains only the eight-hex key prefix (or `-` for missing/malformed headers), state, provider-presence-or-`-`, and HTTP status; `dashboard:ui` has a diagnostic prefix but no body reference. Raw identity and full hash are redacted from session error string fields before logging. Pre-admission refusals never enter this completion wrapper. App INFO can be suppressed by host filters; the optional audit SDK is best-effort and sink failure does not change the response. These host-side writes do not mutate AI-DLC workflow state.
 
 ---
 

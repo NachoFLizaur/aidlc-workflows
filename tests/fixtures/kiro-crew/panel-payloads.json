@@ -1,0 +1,52 @@
+{
+  "sessionKey": "dashboard:conversation-example",
+  "project": { "displayName": "Example project", "stampValid": true },
+  "intent": { "space": "non-default", "id": "record-123", "displayName": "delivery", "eligible": true },
+  "provider": { "label": "codex", "source": "crew-session-map", "present": true, "conflict": false },
+  "guidance": "Bind this conversation before viewing progress.",
+  "reason": "linked-slot",
+  "refusals": [
+    { "status": 200, "state": "unavailable", "code": "BINDING_CHANGED" },
+    { "status": 400, "state": "error", "code": "MISSING_SESSION" },
+    { "status": 400, "state": "error", "code": "INVALID_QUERY" },
+    { "status": 403, "state": "error", "code": "FORBIDDEN" },
+    { "status": 409, "state": "unavailable", "code": "NOT_A_CONVERSATION" },
+    { "status": 409, "state": "unavailable", "code": "INVALID_STAMP" },
+    { "status": 502, "state": "error", "code": "READER_ERROR" },
+    { "status": 503, "state": "unavailable", "code": "SOURCE_MALFORMED" },
+    { "status": 503, "state": "unavailable", "code": "GUARD_UNAVAILABLE" },
+    { "status": 504, "state": "unavailable", "code": "READER_TIMEOUT" }
+  ],
+  "identities": [
+    {
+      "name": "dirName-present",
+      "rows": [{ "uuid": "record-123", "slug": "renamed-slug", "dirName": "delivery-selected", "status": "active" }],
+      "directories": ["delivery-selected"], "intent": "delivery-selected",
+      "census": [{ "space": "non-default", "id": "record-123", "displayName": "renamed-slug", "eligible": true }],
+      "http": 200, "state": "ok", "id": "record-123"
+    },
+    {
+      "name": "slug-hex-suffix",
+      "rows": [{ "uuid": "00000000-0000-0000-0000-000000001111", "slug": "shared", "status": "active" }],
+      "directories": ["shared-00001111"], "intent": "shared-00001111",
+      "census": [{ "space": "non-default", "id": "00000000-0000-0000-0000-000000001111", "displayName": "shared", "eligible": true }],
+      "http": 200, "state": "ok", "id": "00000000-0000-0000-0000-000000001111"
+    },
+    {
+      "name": "ambiguous",
+      "rows": [
+        { "uuid": "record-123", "slug": "delivery", "dirName": "delivery-selected", "status": "active" },
+        { "uuid": "record-456", "slug": "other", "dirName": "delivery-selected", "status": "active" }
+      ],
+      "directories": ["delivery-selected"], "intent": "delivery-selected", "census": [],
+      "http": 503, "state": "unavailable", "code": "AMBIGUOUS_INTENT"
+    },
+    {
+      "name": "registry-only",
+      "rows": [{ "uuid": "record-123", "slug": "delivery", "dirName": "delivery-selected", "status": "active" }],
+      "directories": [], "intent": "delivery-selected",
+      "census": [{ "space": "non-default", "id": "record-123", "displayName": "delivery", "eligible": false, "reason": "registry-only" }],
+      "http": 200, "state": "census"
+    }
+  ]
+}

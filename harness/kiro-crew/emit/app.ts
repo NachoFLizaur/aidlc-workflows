@@ -116,9 +116,14 @@ Every child and continuation uses delegation.md's ordered child brief and delive
     content: appJson({
       name: "aidlc", version: AIDLC_VERSION, displayName: "AI-DLC",
       description: "AI-DLC workflows with a project-local engine and Crew conductor and role agents.",
-      minKiroCrewVersion: "0.6.0", agents, skills: [],
+      minKiroCrewVersion: "0.7.1", agents, skills: [],
       mcpServers: MCP_FRAGMENT.mcpServers,
       ui: { entry: "index.mjs", pages: [{ route: "/apps/aidlc", label: "AI-DLC", icon: "Activity" }] },
+      contributes: { panelTabs: [{
+        id: "progress", title: "AI-DLC", menuLabel: "AI-DLC progress",
+        menuDescription: "Progress of the intent this conversation is running (read-only)",
+        entry: "panel.mjs", icon: "Activity",
+      }] },
       backend: { hooks: { routes: "backend.routes:register_routes" } },
       permissions: { api: ["/api/apps/aidlc"] },
     }),
@@ -127,7 +132,7 @@ Every child and continuation uses delegation.md's ordered child brief and delive
     content: appJson({ schemaVersion: 1, promptResolution: "inline prompt bodies; no file:// prompt references", strippedMcpReferences, roles } satisfies CrewRoleMap),
   });
   // Normalize authored page/route bytes before hashing the complete inventory.
-  for (const path of ["backend/routes.py", "ui/index.mjs"]) {
+  for (const path of ["backend/routes.py", "ui/index.mjs", "ui/panel.mjs"]) {
     emissions.push({ path, mode: 0o644, content: emissionBytes(readFileSync(join(ctx.repoRoot, "harness/kiro-crew/app", path), "utf8")) });
   }
   emissions.push({ path: "app-inventory.json", mode: 0o644, content: appJson(buildAppInventory([...predecessors, ...emissions])) });

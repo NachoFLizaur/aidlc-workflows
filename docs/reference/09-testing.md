@@ -774,6 +774,9 @@ precedence; otherwise discovery tries PATH `python3.12`, then `python3`, checkin
 for version 3.12. An invalid override fails without PATH fallback. Without an
 override or matching PATH interpreter, the driver reports one prerequisite skip.
 That skip is not route validation; supply the interpreter when checking routes.
+The same driver and Python suite also cover the conversation route's owner-cookie
+provenance, exact-header binding, rebind invalidation, and redacted references.
+There is no separate session-route driver or additional interpreter prerequisite.
 
 ```bash
 AIDLC_TEST_PYTHON312="$(command -v python3.12)" bun test tests/unit/t-kiro-crew-progress-shim.test.ts
